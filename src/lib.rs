@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use eframe::egui;
@@ -90,8 +90,14 @@ pub fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
 /// 画像ファイル一覧を自然順（連番対応）でソートする。
 fn sort_image_files(files: &mut [PathBuf]) {
     files.sort_by(|a, b| {
-        let na = a.file_name().map(|s| s.to_string_lossy()).unwrap_or_default();
-        let nb = b.file_name().map(|s| s.to_string_lossy()).unwrap_or_default();
+        let na = a
+            .file_name()
+            .map(|s| s.to_string_lossy())
+            .unwrap_or_default();
+        let nb = b
+            .file_name()
+            .map(|s| s.to_string_lossy())
+            .unwrap_or_default();
         natural_cmp(&na, &nb).then_with(|| a.cmp(b))
     });
 }
@@ -139,16 +145,14 @@ fn downscale_to_cap(rgba: image::RgbaImage, max_side: usize) -> image::RgbaImage
         ((h as f32 * s).round() as u32).max(1),
     );
     let src = image::DynamicImage::ImageRgba8(rgba);
-    let mut dst = fast_image_resize::images::Image::new(
-        nw,
-        nh,
-        fast_image_resize::PixelType::U8x4,
-    );
+    let mut dst = fast_image_resize::images::Image::new(nw, nh, fast_image_resize::PixelType::U8x4);
     let mut resizer = fast_image_resize::Resizer::new();
     let options = fast_image_resize::ResizeOptions::new().resize_alg(
         fast_image_resize::ResizeAlg::Convolution(fast_image_resize::FilterType::Bilinear),
     );
-    resizer.resize(&src, &mut dst, &options).expect("fir resize");
+    resizer
+        .resize(&src, &mut dst, &options)
+        .expect("fir resize");
     image::RgbaImage::from_raw(nw, nh, dst.buffer().to_vec()).expect("fir buffer")
 }
 
@@ -193,30 +197,31 @@ impl ImageLoader {
             let worker_inner = Arc::clone(&inner);
             std::thread::Builder::new()
                 .name(format!("image-preloader-{i}"))
-                .spawn(move || {
-                    loop {
-                        let req = { rx.lock().map(|g| g.recv()).unwrap_or(Err(mpsc::RecvError)) };
-                        let Ok(req) = req else {
-                            break;
-                        };
-                        let already = worker_inner
+                .spawn(move || loop {
+                    let req = { rx.lock().map(|g| g.recv()).unwrap_or(Err(mpsc::RecvError)) };
+                    let Ok(req) = req else {
+                        break;
+                    };
+                    let already = worker_inner
+                        .lock()
+                        .map(|g| g.map.contains_key(&req.path))
+                        .unwrap_or(true);
+                    if already {
+                        worker_inner
                             .lock()
-                            .map(|g| g.map.contains_key(&req.path))
-                            .unwrap_or(true);
-                        if already {
-                            worker_inner.lock().map(|mut g| g.pending.remove(&req.path)).ok();
-                            continue;
-                        }
-                        let result = decode_image(&req.path).ok().map(|img| {
-                            let orig = (img.width(), img.height());
-                            let rgba = downscale_to_cap(img.to_rgba8(), req.max_side);
-                            CachedImage { rgba, orig }
-                        });
-                        if let Ok(mut g) = worker_inner.lock() {
-                            g.pending.remove(&req.path);
-                            if let Some(cached) = result {
-                                g.map.insert(req.path, cached);
-                            }
+                            .map(|mut g| g.pending.remove(&req.path))
+                            .ok();
+                        continue;
+                    }
+                    let result = decode_image(&req.path).ok().map(|img| {
+                        let orig = (img.width(), img.height());
+                        let rgba = downscale_to_cap(img.to_rgba8(), req.max_side);
+                        CachedImage { rgba, orig }
+                    });
+                    if let Ok(mut g) = worker_inner.lock() {
+                        g.pending.remove(&req.path);
+                        if let Some(cached) = result {
+                            g.map.insert(req.path, cached);
                         }
                     }
                 })
@@ -231,7 +236,10 @@ impl ImageLoader {
     }
 
     pub fn is_cached(&self, path: &Path) -> bool {
-        self.inner.lock().map(|g| g.map.contains_key(path)).unwrap_or(false)
+        self.inner
+            .lock()
+            .map(|g| g.map.contains_key(path))
+            .unwrap_or(false)
     }
 
     /// 先読み要求。キャッシュ済み・要求済みなら送らない。
@@ -245,7 +253,14 @@ impl ImageLoader {
                 return;
             }
         }
-        if self.tx.send(PreloadReq { path: path.clone(), max_side }).is_err() {
+        if self
+            .tx
+            .send(PreloadReq {
+                path: path.clone(),
+                max_side,
+            })
+            .is_err()
+        {
             if let Ok(mut g) = self.inner.lock() {
                 g.pending.remove(&path);
             }
@@ -286,10 +301,7 @@ pub fn setup_jp_font(ctx: &egui::Context) {
                 "japanese".to_owned(),
                 egui::FontData::from_owned(bytes).into(),
             );
-            for family in [
-                egui::FontFamily::Proportional,
-                egui::FontFamily::Monospace,
-            ] {
+            for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
                 if let Some(list) = fonts.families.get_mut(&family) {
                     list.insert(0, "japanese".to_owned());
                 }
@@ -408,11 +420,7 @@ impl ViewerApp {
 
     pub fn open_path(&mut self, path: PathBuf, ctx: Option<&egui::Context>) {
         self.files = collect_siblings(&path);
-        self.index = self
-            .files
-            .iter()
-            .position(|p| p == &path)
-            .unwrap_or(0);
+        self.index = self.files.iter().position(|p| p == &path).unwrap_or(0);
         self.rotation = 0;
         self.fit = true;
         self.zoom = 1.0;
@@ -548,8 +556,16 @@ impl ViewerApp {
     pub fn clamp_pan(&mut self, avail: egui::Vec2, disp: egui::Vec2) {
         let rx = (disp.x - avail.x) / 2.0;
         let ry = (disp.y - avail.y) / 2.0;
-        self.pan_offset.x = if rx > 0.0 { self.pan_offset.x.clamp(-rx, rx) } else { 0.0 };
-        self.pan_offset.y = if ry > 0.0 { self.pan_offset.y.clamp(-ry, ry) } else { 0.0 };
+        self.pan_offset.x = if rx > 0.0 {
+            self.pan_offset.x.clamp(-rx, rx)
+        } else {
+            0.0
+        };
+        self.pan_offset.y = if ry > 0.0 {
+            self.pan_offset.y.clamp(-ry, ry)
+        } else {
+            0.0
+        };
     }
 
     /// anchor（画面座標）を基準にズーム。fit中はその倍率を起点に手動モードへ移行する。
@@ -759,7 +775,9 @@ impl ViewerApp {
         }
         if self.texture.is_some() {
             if ctx.input(|i| {
-                i.key_pressed(egui::Key::Plus) || i.key_pressed(egui::Key::Equals) || i.key_pressed(egui::Key::E)
+                i.key_pressed(egui::Key::Plus)
+                    || i.key_pressed(egui::Key::Equals)
+                    || i.key_pressed(egui::Key::E)
             }) {
                 self.zoom_centered(1.25);
             }
@@ -933,7 +951,11 @@ impl eframe::App for ViewerApp {
                             .show_value(true),
                     );
                 }
-                let fs_label = if self.fullscreen { "全画面解除" } else { "全画面" };
+                let fs_label = if self.fullscreen {
+                    "全画面解除"
+                } else {
+                    "全画面"
+                };
                 if ui.button(fs_label).on_hover_text("全画面 (F)").clicked() {
                     self.fullscreen = !self.fullscreen;
                     ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.fullscreen));
@@ -1046,19 +1068,16 @@ impl eframe::App for ViewerApp {
             self.clamp_pan(avail, disp);
             let center = view_rect.center() + self.pan_offset;
             let img_rect = egui::Rect::from_center_size(center, disp);
-            ui.put(
-                img_rect,
-                egui::Image::new(&handle).fit_to_exact_size(disp),
-            );
+            ui.put(img_rect, egui::Image::new(&handle).fit_to_exact_size(disp));
         });
     }
 }
 
 pub fn run() -> eframe::Result<()> {
-
-    let initial: Option<PathBuf> = std::env::args_os().nth(1).map(PathBuf::from).filter(|p| {
-        p.is_dir() || is_supported(p) || p.exists()
-    });
+    let initial: Option<PathBuf> = std::env::args_os()
+        .nth(1)
+        .map(PathBuf::from)
+        .filter(|p| p.is_dir() || is_supported(p) || p.exists());
 
     let mut app = ViewerApp::new(initial);
     // 起動時に file が決まっている場合、先にデコードだけしておく
@@ -1132,9 +1151,25 @@ mod tests {
         app.fit = false;
         app.zoom = 1.0;
         let avail = egui::vec2(1000.0, 700.0);
-        app.zoom_at(1e9, egui::pos2(500.0, 350.0), egui::pos2(500.0, 350.0), 1.0, avail, 100.0, 100.0);
+        app.zoom_at(
+            1e9,
+            egui::pos2(500.0, 350.0),
+            egui::pos2(500.0, 350.0),
+            1.0,
+            avail,
+            100.0,
+            100.0,
+        );
         assert!(approx(app.zoom_level(), 32.0));
-        app.zoom_at(1e-9, egui::pos2(500.0, 350.0), egui::pos2(500.0, 350.0), 32.0, avail, 100.0, 100.0);
+        app.zoom_at(
+            1e-9,
+            egui::pos2(500.0, 350.0),
+            egui::pos2(500.0, 350.0),
+            32.0,
+            avail,
+            100.0,
+            100.0,
+        );
         assert!(approx(app.zoom_level(), 0.05));
     }
 
@@ -1164,11 +1199,19 @@ mod tests {
         // 画像が覆う範囲（端合わせ）までに制限される
         app.pan_offset = egui::vec2(99999.0, -99999.0);
         app.clamp_pan(egui::vec2(1000.0, 700.0), egui::vec2(2000.0, 1400.0));
-        assert!(approx(app.pan().x, 500.0) && approx(app.pan().y, -350.0), "got {:?}", app.pan());
+        assert!(
+            approx(app.pan().x, 500.0) && approx(app.pan().y, -350.0),
+            "got {:?}",
+            app.pan()
+        );
         // 画像が領域より小さい軸は中央固定
         app.pan_offset = egui::vec2(99999.0, -99999.0);
         app.clamp_pan(egui::vec2(1000.0, 700.0), egui::vec2(400.0, 300.0));
-        assert!(approx(app.pan().x, 0.0) && approx(app.pan().y, 0.0), "got {:?}", app.pan());
+        assert!(
+            approx(app.pan().x, 0.0) && approx(app.pan().y, 0.0),
+            "got {:?}",
+            app.pan()
+        );
     }
 
     #[test]
@@ -1198,7 +1241,10 @@ mod tests {
             .iter()
             .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
             .collect();
-        assert_eq!(names, vec!["1.png", "2.png", "9.png", "10.png", "11.jpg", "a.png"]);
+        assert_eq!(
+            names,
+            vec!["1.png", "2.png", "9.png", "10.png", "11.jpg", "a.png"]
+        );
     }
 
     #[test]

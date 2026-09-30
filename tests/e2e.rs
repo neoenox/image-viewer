@@ -5,16 +5,12 @@
 //! 「開く→移動→回転→ズーム→エラー系」の一連の操作を検証する。
 //! GUIイベント注入（キー・マウス）は対象外。ネイティブダイアログも開かない。
 
-use image_viewer::{ViewerApp, collect_siblings, decode_image, is_supported, setup_jp_font};
+use image_viewer::{collect_siblings, decode_image, is_supported, setup_jp_font, ViewerApp};
 use std::path::{Path, PathBuf};
 
 /// テストごとに独立したフィクスチャフォルダを作る。tagで並列実行時の衝突を避ける。
 fn fixture_dir(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "image-viewer-e2e-{}-{}",
-        std::process::id(),
-        tag
-    ));
+    let dir = std::env::temp_dir().join(format!("image-viewer-e2e-{}-{}", std::process::id(), tag));
     if dir.exists() {
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -42,11 +38,17 @@ fn fixture_dir(tag: &str) -> PathBuf {
     solid(&dir.join("a.png"), 100, 80, Rgba([200, 30, 30, 255]));
     solid(&dir.join("b.jpg"), 60, 60, Rgba([30, 30, 200, 255]));
     // 誤ラベル: 中身JPEG・拡張子.png
-    let mislabeled =
-        image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(40, 30, Rgba([30, 200, 30, 255])));
+    let mislabeled = image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+        40,
+        30,
+        Rgba([30, 200, 30, 255]),
+    ));
     let mut bytes = Vec::new();
     mislabeled
-        .write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Jpeg)
+        .write_to(
+            &mut std::io::Cursor::new(&mut bytes),
+            image::ImageFormat::Jpeg,
+        )
         .unwrap();
     std::fs::write(dir.join("c.png"), &bytes).unwrap();
     // 壊れたファイル（拡張子は対応形式）
@@ -54,7 +56,12 @@ fn fixture_dir(tag: &str) -> PathBuf {
     // 未対応拡張子（一覧から除外される）
     std::fs::write(dir.join("e.txt"), b"hello").unwrap();
     // テクスチャ上限(2048)超えの巨大画像。jpgで保存して高速化。
-    solid(&dir.join("z-big.jpg"), 3000, 2000, Rgba([120, 120, 120, 255]));
+    solid(
+        &dir.join("z-big.jpg"),
+        3000,
+        2000,
+        Rgba([120, 120, 120, 255]),
+    );
     dir
 }
 
