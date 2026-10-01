@@ -16,3 +16,6 @@ opt-level = 2
 strip = true
 lto = false
 panic = "unwind"
+
+[dev-dependencies]
+ttf-parser = "0.25"

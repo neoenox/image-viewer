@@ -12,6 +12,25 @@ pub const SUPPORTED_EXTS: &[&str] = &[
     "pbm", "pgm", "ppm", "pam",
 ];
 
+/// ツールバーアイコン。Noto Sans JP と Segoe UI Symbol の両方にあるグリフのみ使う。
+/// （Segoe UI Symbolは setup_jp_font でフォールバック登録される）
+pub const ICON_OPEN: char = '\u{1F4C1}';
+pub const ICON_PREV: char = '\u{23EE}';
+pub const ICON_NEXT: char = '\u{23ED}';
+pub const ICON_FIT: char = '\u{26F6}';
+pub const ICON_ROT_L: char = '\u{27F2}';
+pub const ICON_ROT_R: char = '\u{27F3}';
+pub const ICON_PLAY: char = '\u{25B6}';
+pub const ICON_STOP: char = '\u{25A0}';
+pub const ICON_FULL: char = '\u{2922}';
+pub const ICON_ASSOC: char = '\u{1F517}';
+
+/// ツールバーで使う全アイコン。tofu防止の回帰テスト用。
+pub const TOOLBAR_ICONS: &[char] = &[
+    ICON_OPEN, ICON_PREV, ICON_NEXT, ICON_FIT, ICON_ROT_L, ICON_ROT_R, ICON_PLAY, ICON_STOP,
+    ICON_FULL, ICON_ASSOC,
+];
+
 pub fn is_supported(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
@@ -285,6 +304,7 @@ impl Default for ImageLoader {
 
 /// 日本語フォントをシステムから読み込む。
 /// egui既定フォントには日本語グリフが無いため、C:\Windows\Fonts から探して先頭に登録する。
+/// ツールバーアイコン用に Segoe UI Symbol もフォールバック登録する。
 /// 見つからなければ既定のまま（□表示の可能性あり）。
 pub fn setup_jp_font(ctx: &egui::Context) {
     let candidates = [
@@ -295,23 +315,38 @@ pub fn setup_jp_font(ctx: &egui::Context) {
         "NotoSerifJP-VF.ttf",
     ];
     let windir = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_owned());
+    let fonts_dir = std::path::Path::new(&windir).join("Fonts");
+    let mut fonts = egui::FontDefinitions::default();
+    let mut order: Vec<String> = Vec::new();
     for name in candidates {
-        let path = std::path::Path::new(&windir).join("Fonts").join(name);
-        if let Ok(bytes) = std::fs::read(&path) {
-            let mut fonts = egui::FontDefinitions::default();
+        if let Ok(bytes) = std::fs::read(fonts_dir.join(name)) {
             fonts.font_data.insert(
                 "japanese".to_owned(),
                 egui::FontData::from_owned(bytes).into(),
             );
-            for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
-                if let Some(list) = fonts.families.get_mut(&family) {
-                    list.insert(0, "japanese".to_owned());
-                }
-            }
-            ctx.set_fonts(fonts);
-            return;
+            order.push("japanese".to_owned());
+            break;
         }
     }
+    // 記号（ツールバーのアイコン用）。日本語フォントの後ろに置く。
+    if let Ok(bytes) = std::fs::read(fonts_dir.join("seguisym.ttf")) {
+        fonts.font_data.insert(
+            "symbols".to_owned(),
+            egui::FontData::from_owned(bytes).into(),
+        );
+        order.push("symbols".to_owned());
+    }
+    if order.is_empty() {
+        return;
+    }
+    for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+        if let Some(list) = fonts.families.get_mut(&family) {
+            for (i, name) in order.iter().enumerate() {
+                list.insert(i, name.clone());
+            }
+        }
+    }
+    ctx.set_fonts(fonts);
 }
 
 pub struct ViewerApp {
@@ -904,28 +939,44 @@ impl eframe::App for ViewerApp {
         // ---- ツールバー ----
         egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
             ui.horizontal_wrapped(|ui| {
-                if ui.button("開く").clicked() {
+                if ui
+                    .button(ICON_OPEN.to_string())
+                    .on_hover_text("開く (Ctrl+O)")
+                    .clicked()
+                {
                     self.open_dialog(ctx);
                 }
                 ui.separator();
                 let has = !self.files.is_empty();
                 ui.add_enabled_ui(has, |ui| {
-                    if ui.button("前へ").clicked() {
+                    if ui
+                        .button(ICON_PREV.to_string())
+                        .on_hover_text("前へ (←)")
+                        .clicked()
+                    {
                         self.prev(ctx);
                     }
-                    if ui.button("次へ").clicked() {
+                    if ui
+                        .button(ICON_NEXT.to_string())
+                        .on_hover_text("次へ (→)")
+                        .clicked()
+                    {
                         self.next(ctx);
                     }
                 });
                 ui.separator();
                 ui.add_enabled_ui(self.texture.is_some(), |ui| {
-                    if ui.button("-").clicked() {
+                    if ui.button("-").on_hover_text("縮小 (-)").clicked() {
                         self.zoom_centered(1.0 / 1.25);
                     }
-                    if ui.button("+").clicked() {
+                    if ui.button("+").on_hover_text("拡大 (+)").clicked() {
                         self.zoom_centered(1.25);
                     }
-                    if ui.button("フィット").clicked() {
+                    if ui
+                        .button(ICON_FIT.to_string())
+                        .on_hover_text("フィット (0)")
+                        .clicked()
+                    {
                         self.fit = true;
                         self.pan_offset = egui::Vec2::ZERO;
                     }
@@ -933,20 +984,28 @@ impl eframe::App for ViewerApp {
                         self.fit = false;
                         self.zoom = 1.0;
                     }
-                    if ui.button("左回転").on_hover_text("Shift+R").clicked() {
+                    if ui
+                        .button(ICON_ROT_L.to_string())
+                        .on_hover_text("左回転 (Shift+R)")
+                        .clicked()
+                    {
                         self.rotate_ccw(ctx);
                     }
-                    if ui.button("右回転").on_hover_text("R").clicked() {
+                    if ui
+                        .button(ICON_ROT_R.to_string())
+                        .on_hover_text("右回転 (R)")
+                        .clicked()
+                    {
                         self.rotate_cw(ctx);
                     }
                 });
                 ui.separator();
-                let label = if self.slideshow { "停止" } else { "再生" };
-                if ui
-                    .button(label)
-                    .on_hover_text("スライドショー (Space)")
-                    .clicked()
-                {
+                let (label, tip) = if self.slideshow {
+                    (ICON_STOP.to_string(), "停止 (Space)")
+                } else {
+                    (ICON_PLAY.to_string(), "再生 (Space)")
+                };
+                if ui.button(label).on_hover_text(tip).clicked() {
                     self.slideshow = !self.slideshow;
                     self.last_advance = Some(Instant::now());
                 }
@@ -957,16 +1016,24 @@ impl eframe::App for ViewerApp {
                             .show_value(true),
                     );
                 }
-                let fs_label = if self.fullscreen {
-                    "全画面解除"
+                let fs_tip = if self.fullscreen {
+                    "全画面解除 (Esc)"
                 } else {
-                    "全画面"
+                    "全画面 (F)"
                 };
-                if ui.button(fs_label).on_hover_text("全画面 (F)").clicked() {
+                if ui
+                    .button(ICON_FULL.to_string())
+                    .on_hover_text(fs_tip)
+                    .clicked()
+                {
                     self.fullscreen = !self.fullscreen;
                     ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.fullscreen));
                 }
-                if ui.button("関連付け").clicked() {
+                if ui
+                    .button(ICON_ASSOC.to_string())
+                    .on_hover_text("ファイル関連付け")
+                    .clicked()
+                {
                     self.refresh_assoc_status();
                     self.show_assoc = true;
                 }
@@ -1321,6 +1388,33 @@ mod tests {
             names,
             vec!["1.png", "2.png", "9.png", "10.png", "11.jpg", "a.png"]
         );
+    }
+
+    #[test]
+    fn toolbar_icons_covered_by_fonts() {
+        // ツールバーアイコンが読み込むフォントのどれかに存在すること（tofu防止）。
+        // フォントファイルが無い環境ではスキップ。
+        let windir = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_owned());
+        let fonts_dir = std::path::Path::new(&windir).join("Fonts");
+        let mut blobs: Vec<Vec<u8>> = Vec::new();
+        for name in ["NotoSansJP-VF.ttf", "seguisym.ttf"] {
+            if let Ok(bytes) = std::fs::read(fonts_dir.join(name)) {
+                blobs.push(bytes);
+            }
+        }
+        if blobs.is_empty() {
+            eprintln!("skip: no system fonts found");
+            return;
+        }
+        let faces: Vec<ttf_parser::Face<'_>> = blobs
+            .iter()
+            .filter_map(|b| ttf_parser::Face::parse(b, 0).ok())
+            .collect();
+        assert!(!faces.is_empty(), "no parsable fonts");
+        for cp in TOOLBAR_ICONS {
+            let covered = faces.iter().any(|f| f.glyph_index(*cp).is_some());
+            assert!(covered, "glyph U+{:04X} missing in all fonts", *cp as u32);
+        }
     }
 
     #[test]
