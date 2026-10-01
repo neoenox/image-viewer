@@ -11,6 +11,12 @@
 
 $ErrorActionPreference = "Stop"
 
+function Initialize-RegistryKey([string]$Path) {
+    if (-not (Test-Path -LiteralPath $Path)) {
+        New-Item -Path $Path -Force | Out-Null
+    }
+}
+
 $progId = "ImageViewer.App"
 $appName = "画像ビューワー"
 $backupFile = Join-Path $env:LOCALAPPDATA "ImageViewer\assoc-backup\backup.xml"
@@ -25,10 +31,17 @@ foreach ($row in $backup) {
     if ([string]::IsNullOrEmpty($row.ClassesDefault)) {
         if ((Test-Path -LiteralPath $cls) -and
             ((Get-ItemProperty -LiteralPath $cls -Name "(default)" -ErrorAction SilentlyContinue)."(default)" -eq $progId)) {
-            Remove-Item -LiteralPath $cls -Recurse -Force
+            $keyName = (Get-Item -LiteralPath $cls).Name
+            $relativeName = $keyName.Substring('HKEY_CURRENT_USER\'.Length)
+            $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($relativeName, $true)
+            try {
+                $key.DeleteValue('', $false)
+            } finally {
+                $key.Dispose()
+            }
         }
     } else {
-        New-Item -Path $cls -Force | Out-Null
+        Initialize-RegistryKey -Path $cls | Out-Null
         Set-ItemProperty -LiteralPath $cls -Name "(default)" -Value $row.ClassesDefault
     }
     Write-Output ".$($row.Ext) -> $($row.ClassesDefault) (UserChoiceはUIから選び直してください)"
@@ -50,5 +63,6 @@ public class ShellNotify2 {
 [ShellNotify2]::SHChangeNotify(0x08000000, 0, [IntPtr]::Zero, [IntPtr]::Zero)
 
 Write-Output "関連付けを戻しました"
+Remove-Item -LiteralPath $backupFile
 
 

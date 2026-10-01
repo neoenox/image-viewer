@@ -19,6 +19,12 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+function Initialize-RegistryKey([string]$Path) {
+    if (-not (Test-Path -LiteralPath $Path)) {
+        New-Item -Path $Path -Force | Out-Null
+    }
+}
+
 if ([string]::IsNullOrWhiteSpace($ExePath)) {
     $ExePath = Join-Path $PSScriptRoot "..\target\release\image-viewer.exe"
 }
@@ -48,31 +54,34 @@ $backup = foreach ($e in $exts) {
     }
     [pscustomobject]@{ Ext = $e; ClassesDefault = $clsDef; UserChoiceProgId = $ucProg }
 }
-$backup | Export-Clixml -LiteralPath (Join-Path $backupDir "backup.xml")
+$backupFile = Join-Path $backupDir "backup.xml"
+if (-not (Test-Path -LiteralPath $backupFile)) {
+    $backup | Export-Clixml -LiteralPath $backupFile
+}
 Write-Output "backup -> $backupDir\backup.xml"
 
 # --- ProgID登録 ---
-New-Item -Path "HKCU:\Software\Classes\$progId" -Force | Out-Null
+Initialize-RegistryKey -Path "HKCU:\Software\Classes\$progId" | Out-Null
 Set-ItemProperty -LiteralPath "HKCU:\Software\Classes\$progId" -Name "(default)" -Value $appName
-New-Item -Path "HKCU:\Software\Classes\$progId\DefaultIcon" -Force | Out-Null
+Initialize-RegistryKey -Path "HKCU:\Software\Classes\$progId\DefaultIcon" | Out-Null
 Set-ItemProperty -LiteralPath "HKCU:\Software\Classes\$progId\DefaultIcon" -Name "(default)" -Value "`"$ExePath`",0"
-New-Item -Path "HKCU:\Software\Classes\$progId\shell\open\command" -Force | Out-Null
+Initialize-RegistryKey -Path "HKCU:\Software\Classes\$progId\shell\open\command" | Out-Null
 Set-ItemProperty -LiteralPath "HKCU:\Software\Classes\$progId\shell\open\command" -Name "(default)" -Value "`"$ExePath`" `"%1`""
 
 # --- 「プログラムから開く」用エントリ ---
 $appKey = "HKCU:\Software\Classes\Applications\image-viewer.exe"
-New-Item -Path $appKey -Force | Out-Null
+Initialize-RegistryKey -Path $appKey | Out-Null
 Set-ItemProperty -LiteralPath $appKey -Name "FriendlyAppName" -Value $appName
-New-Item -Path "$appKey\shell\open\command" -Force | Out-Null
+Initialize-RegistryKey -Path "$appKey\shell\open\command" | Out-Null
 Set-ItemProperty -LiteralPath "$appKey\shell\open\command" -Name "(default)" -Value "`"$ExePath`" `"%1`""
-New-Item -Path "$appKey\SupportedTypes" -Force | Out-Null
+Initialize-RegistryKey -Path "$appKey\SupportedTypes" | Out-Null
 foreach ($e in $exts) {
     New-ItemProperty -LiteralPath "$appKey\SupportedTypes" -Name ".$e" -Value "" -Force | Out-Null
 }
 
 # --- Default Programs (設定画面) 用Capabilities ---
 $cap = "HKCU:\Software\ImageViewer\Capabilities"
-New-Item -Path "$cap\FileAssociations" -Force | Out-Null
+Initialize-RegistryKey -Path "$cap\FileAssociations" | Out-Null
 Set-ItemProperty -LiteralPath $cap -Name "ApplicationName" -Value $appName
 Set-ItemProperty -LiteralPath $cap -Name "ApplicationDescription" -Value $appName
 foreach ($e in $exts) {
@@ -82,7 +91,7 @@ New-ItemProperty -LiteralPath "HKCU:\Software\RegisteredApplications" -Name $app
 
 # --- 各拡張子の既定を向けてUserChoiceを外す ---
 foreach ($e in $exts) {
-    New-Item -Path "HKCU:\Software\Classes\.$e" -Force | Out-Null
+    Initialize-RegistryKey -Path "HKCU:\Software\Classes\.$e" | Out-Null
     Set-ItemProperty -LiteralPath "HKCU:\Software\Classes\.$e" -Name "(default)" -Value $progId
     Remove-Item -LiteralPath "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\.$e\UserChoice" -Force -ErrorAction SilentlyContinue
 }
