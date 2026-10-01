@@ -1096,24 +1096,30 @@ impl eframe::App for ViewerApp {
                 .open(&mut open)
                 .resizable(false)
                 .show(ctx, |ui| {
-                    ui.label("画像形式とこのアプリを関連付けます（管理者権限不要）。");
+                    let done = self.assoc_status.iter().filter(|(_, d)| *d).count();
+                    let total = self.assoc_status.len();
+                    ui.heading(format!("関連付け: {done}/{total} 済み"));
+                    ui.add_space(4.0);
+                    if ui.button("関連付けを設定する").clicked() {
+                        if let Ok(exe) = assoc::exe_path() {
+                            let _ = assoc::register(
+                                assoc::PROG_ID,
+                                assoc::APP_NAME,
+                                assoc::CAPS_BASE,
+                                &exe,
+                                SUPPORTED_EXTS,
+                            );
+                        }
+                        let _ = assoc::open_default_apps();
+                        self.refresh_assoc_status();
+                    }
+                    ui.small("登録後に設定画面が開くので、各形式をクリックして確定。");
+                    ui.separator();
                     ui.horizontal(|ui| {
-                        if ui.button("関連付けを登録").clicked() {
-                            if let Ok(exe) = assoc::exe_path() {
-                                let _ = assoc::register(
-                                    assoc::PROG_ID,
-                                    assoc::APP_NAME,
-                                    assoc::CAPS_BASE,
-                                    &exe,
-                                    SUPPORTED_EXTS,
-                                );
-                            }
+                        if ui.small_button("状態を更新").clicked() {
                             self.refresh_assoc_status();
                         }
-                        if ui.button("設定画面を開く").clicked() {
-                            let _ = assoc::open_default_apps();
-                        }
-                        if ui.button("登録を解除").clicked() {
+                        if ui.small_button("登録を解除").clicked() {
                             if let Ok(exe) = assoc::exe_path() {
                                 let name = exe
                                     .file_name()
@@ -1130,22 +1136,21 @@ impl eframe::App for ViewerApp {
                             self.refresh_assoc_status();
                         }
                     });
-                    ui.small("済=ダブルクリックで開く / 未=未設定。「登録」→「設定画面を開く」の順で確定。");
-                    ui.separator();
-                    egui::ScrollArea::vertical()
-                        .max_height(300.0)
-                        .show(ui, |ui| {
-                            for (ext, done) in &self.assoc_status {
-                                ui.horizontal(|ui| {
+                    ui.collapsing(format!("形式ごとの状態（全{total}件）"), |ui| {
+                        egui::Grid::new("assoc-grid").num_columns(6).show(ui, |ui| {
+                            for chunk in self.assoc_status.chunks(3) {
+                                for (ext, done) in chunk {
                                     if *done {
                                         ui.colored_label(egui::Color32::GREEN, "済");
                                     } else {
                                         ui.colored_label(egui::Color32::GRAY, "未");
                                     }
                                     ui.label(format!(".{ext}"));
-                                });
+                                }
+                                ui.end_row();
                             }
                         });
+                    });
                 });
             self.show_assoc = open;
         }
