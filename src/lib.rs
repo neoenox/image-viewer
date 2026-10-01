@@ -193,8 +193,8 @@ struct PreloadReq {
 }
 
 struct CacheInner {
-    map: HashMap<PathBuf, CachedImage>,
-    pending: HashSet<PathBuf>,
+    map: HashMap<(PathBuf, usize), CachedImage>,
+    pending: HashSet<(PathBuf, usize)>,
 }
 
 /// 前後画像をバックグラウンドでデコードする先読みローダー。
@@ -227,15 +227,13 @@ impl ImageLoader {
                     let Ok(req) = req else {
                         break;
                     };
+                    let key = (req.path.clone(), req.max_side);
                     let already = worker_inner
                         .lock()
-                        .map(|g| g.map.contains_key(&req.path))
+                        .map(|g| g.map.contains_key(&key))
                         .unwrap_or(true);
                     if already {
-                        worker_inner
-                            .lock()
-                            .map(|mut g| g.pending.remove(&req.path))
-                            .ok();
+                        worker_inner.lock().map(|mut g| g.pending.remove(&key)).ok();
                         continue;
                     }
                     let result = decode_image(&req.path).ok().map(|img| {
@@ -244,9 +242,9 @@ impl ImageLoader {
                         CachedImage { rgba, orig }
                     });
                     if let Ok(mut g) = worker_inner.lock() {
-                        g.pending.remove(&req.path);
+                        g.pending.remove(&key);
                         if let Some(cached) = result {
-                            g.map.insert(req.path, cached);
+                            g.map.insert(key, cached);
                         }
                     }
                 })
@@ -256,25 +254,30 @@ impl ImageLoader {
     }
 
     /// キャッシュから取り出す（ヒットしたら所有権を移す）。
-    pub fn take(&self, path: &Path) -> Option<CachedImage> {
-        self.inner.lock().ok()?.map.remove(path)
-    }
-
-    pub fn is_cached(&self, path: &Path) -> bool {
+    pub fn take(&self, path: &Path, max_side: usize) -> Option<CachedImage> {
         self.inner
             .lock()
-            .map(|g| g.map.contains_key(path))
+            .ok()?
+            .map
+            .remove(&(path.to_path_buf(), max_side))
+    }
+
+    pub fn is_cached(&self, path: &Path, max_side: usize) -> bool {
+        self.inner
+            .lock()
+            .map(|g| g.map.contains_key(&(path.to_path_buf(), max_side)))
             .unwrap_or(false)
     }
 
     /// 先読み要求。キャッシュ済み・要求済みなら送らない。
     pub fn request(&self, path: PathBuf, max_side: usize) {
+        let key = (path.clone(), max_side);
         {
             let mut g = match self.inner.lock() {
                 Ok(g) => g,
                 Err(_) => return,
             };
-            if g.map.contains_key(&path) || !g.pending.insert(path.clone()) {
+            if g.map.contains_key(&key) || !g.pending.insert(key.clone()) {
                 return;
             }
         }
@@ -287,15 +290,16 @@ impl ImageLoader {
             .is_err()
         {
             if let Ok(mut g) = self.inner.lock() {
-                g.pending.remove(&path);
+                g.pending.remove(&key);
             }
         }
     }
 
     /// 指定パス以外をキャッシュから捨てる。pendingは完了時に整理される。
-    pub fn prune(&self, keep: &[PathBuf]) {
+    pub fn prune(&self, keep: &[PathBuf], max_side: usize) {
         if let Ok(mut g) = self.inner.lock() {
-            g.map.retain(|p, _| keep.contains(p));
+            g.map
+                .retain(|(p, cap), _| keep.contains(p) && *cap == max_side);
         }
     }
 }
@@ -375,6 +379,7 @@ pub struct ViewerApp {
     peek_saved: Option<PeekState>,
     loader: ImageLoader,
     tex_cap: usize,
+    base_cap: usize,
     orig_dims: Option<(u32, u32)>,
     show_assoc: bool,
     assoc_status: Vec<(String, bool)>,
@@ -412,6 +417,7 @@ impl ViewerApp {
             peek_saved: None,
             loader: ImageLoader::new(),
             tex_cap: 2048,
+            base_cap: 2048,
             orig_dims: None,
             show_assoc: false,
             assoc_status: Vec::new(),
@@ -447,6 +453,9 @@ impl ViewerApp {
     fn rebuild_texture(&mut self, ctx: &egui::Context) {
         // GPU上限は環境で変わり得るため都度取得
         self.tex_cap = ctx.input(|i| i.max_texture_side).max(512);
+        if self.base.is_some() && self.base_cap != self.tex_cap {
+            self.load_current(None);
+        }
         if let Some(rgba) = self.oriented_image() {
             // 通常は先読み/読込時に縮小済み。念のため上限ガード。
             let rgba = downscale_to_cap(rgba, self.tex_cap);
@@ -473,6 +482,7 @@ impl ViewerApp {
     }
 
     fn load_current(&mut self, ctx: Option<&egui::Context>) {
+        self.base_cap = self.tex_cap;
         self.detail_tiles.clear();
         self.load_error = None;
         self.texture = None;
@@ -482,7 +492,7 @@ impl ViewerApp {
             return;
         };
         // 先読みキャッシュ優先（移動時のもたつきを消す）
-        if let Some(cached) = self.loader.take(&path) {
+        if let Some(cached) = self.loader.take(&path, self.tex_cap) {
             self.base = Some(cached.rgba);
             self.orig_dims = Some(cached.orig);
             self.status_msg.clear();
@@ -525,13 +535,16 @@ impl ViewerApp {
         let next2 = at(self.index + 2);
         let prev2 = at((self.index + n - (2 % n)) % n);
         let current = self.files[self.index].clone();
-        self.loader.prune(&[
-            current,
-            next.clone(),
-            prev.clone(),
-            next2.clone(),
-            prev2.clone(),
-        ]);
+        self.loader.prune(
+            &[
+                current,
+                next.clone(),
+                prev.clone(),
+                next2.clone(),
+                prev2.clone(),
+            ],
+            self.tex_cap,
+        );
         for p in [next, prev, next2, prev2] {
             self.loader.request(p, self.tex_cap);
         }
@@ -815,7 +828,7 @@ impl ViewerApp {
         self.pan_offset
     }
     pub fn is_preloaded(&self, path: &Path) -> bool {
-        self.loader.is_cached(path)
+        self.loader.is_cached(path, self.tex_cap)
     }
 
     /// 関連付けダイアログ用に各拡張子の既定状態を読み直す。
@@ -979,7 +992,10 @@ impl ViewerApp {
 impl eframe::App for ViewerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // GPU上限を最新化（先読みの縮小サイズに使う）
-        self.tex_cap = ctx.input(|i| i.max_texture_side).max(512);
+        let cap = ctx.input(|i| i.max_texture_side).max(512);
+        if cap != self.tex_cap {
+            self.rebuild_texture(ctx);
+        }
         self.apply_dropped(ctx);
         self.handle_keys(ctx);
         self.handle_wheel_nav(ctx);
@@ -1268,7 +1284,6 @@ impl eframe::App for ViewerApp {
                                     assoc::APP_NAME,
                                     assoc::CAPS_BASE,
                                     &name,
-                                    SUPPORTED_EXTS,
                                 );
                             }
                             self.refresh_assoc_status();
@@ -1570,6 +1585,73 @@ mod tests {
         assert_eq!(
             app.detail_tiles.last().unwrap().1.max,
             egui::pos2(1200.0, 1400.0)
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn startup_texture_uses_initialized_gpu_cap() {
+        let dir = std::env::temp_dir().join(format!("image-viewer-gpu-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("large.png");
+        image::RgbaImage::new(3000, 2100).save(&path).unwrap();
+        let mut app = ViewerApp::new(Some(path));
+        let ctx = egui::Context::default();
+        let _ = ctx.run(
+            egui::RawInput {
+                max_texture_side: Some(4096),
+                ..Default::default()
+            },
+            |_| {},
+        );
+        app.rebuild_texture(&ctx);
+        assert_eq!(app.texture_size(), Some([3000, 2100]));
+        let _ = ctx.run(
+            egui::RawInput {
+                max_texture_side: Some(1024),
+                ..Default::default()
+            },
+            |_| {},
+        );
+        app.rebuild_texture(&ctx);
+        assert_eq!(app.texture_size(), Some([1024, 717]));
+        let _ = ctx.run(
+            egui::RawInput {
+                max_texture_side: Some(4096),
+                ..Default::default()
+            },
+            |_| {},
+        );
+        app.rebuild_texture(&ctx);
+        assert_eq!(app.texture_size(), Some([3000, 2100]));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn preload_cache_separates_gpu_caps_even_when_requests_overlap() {
+        let dir = std::env::temp_dir().join(format!("image-viewer-caps-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("large.png");
+        image::RgbaImage::new(1400, 1200).save(&path).unwrap();
+        let loader = ImageLoader::new();
+        loader.request(path.clone(), 1024);
+        loader.request(path.clone(), 2048);
+        let started = Instant::now();
+        while !loader.is_cached(&path, 1024) || !loader.is_cached(&path, 2048) {
+            assert!(
+                started.elapsed() < Duration::from_secs(15),
+                "preload timed out"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(loader.take(&path, 4096).is_none());
+        assert_eq!(
+            loader.take(&path, 1024).unwrap().rgba.dimensions(),
+            (1024, 878)
+        );
+        assert_eq!(
+            loader.take(&path, 2048).unwrap().rgba.dimensions(),
+            (1400, 1200)
         );
         std::fs::remove_dir_all(dir).unwrap();
     }

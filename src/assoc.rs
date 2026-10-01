@@ -1,7 +1,7 @@
 //! ファイル関連付け（Windows per-user, 管理者権限不要）。
 //!
 //! できること：ProgID・起動コマンド・アイコン・Capabilities の登録、
-//! 拡張子ごとの既定ProgIDの設定、現在の既定状態の参照、設定画面の起動。
+//! 現在の既定状態の参照、設定画面の起動。拡張子の既定値は変更しない。
 //! できないこと：UserChoiceハッシュの直接書き込み（OSが保護）。
 //! ダブルクリック既定の確定は設定画面でのユーザー操作が必要。
 
@@ -35,7 +35,7 @@ pub fn is_default(ext: &str, prog_id: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// 関連付けを登録する。既存の既定は上書きする（戻す場合は [`unregister`]）。
+/// 候補アプリとして登録する。既定値とUserChoiceは変更しない。
 pub fn register(
     prog_id: &str,
     app_name: &str,
@@ -83,11 +83,6 @@ pub fn register(
     let (k, _) = hkcu.create_subkey(r"Software\RegisteredApplications")?;
     k.set_value(app_name, &caps_base.to_owned())?;
 
-    // 各拡張子の既定を向ける
-    for e in exts {
-        let (k, _) = hkcu.create_subkey(format!(r"Software\Classes\.{e}"))?;
-        k.set_value("", &prog_id.to_owned())?;
-    }
     Ok(())
 }
 
@@ -98,20 +93,8 @@ pub fn unregister(
     app_name: &str,
     caps_base: &str,
     exe_name: &str,
-    exts: &[&str],
 ) -> io::Result<()> {
     let hkcu = hkcu();
-    // 拡張子の既定が自分なら値だけ消す（キー自体は残す）。
-    // ※open_subkeyは読み取り専用のため、書き込み可能なcreate_subkeyで開く。
-    for e in exts {
-        let path = format!(r"Software\Classes\.{e}");
-        if let Ok((k, _)) = hkcu.create_subkey(&path) {
-            let cur: Option<String> = k.get_value("").ok();
-            if cur.as_deref() == Some(prog_id) {
-                k.delete_value("").ok();
-            }
-        }
-    }
     hkcu.delete_subkey_all(format!(r"Software\Classes\{prog_id}"))
         .ok();
     hkcu.delete_subkey_all(format!(r"Software\Classes\Applications\{exe_name}"))

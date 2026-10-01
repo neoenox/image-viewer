@@ -17,7 +17,7 @@ cargo test
 ```
 
 Association script regression tests use a temporary registry subtree and temporary
-backup directory, preserving the user's real file associations:
+data directory, preserving the user's real file associations:
 
 ```powershell
 powershell -NoProfile -File tests/association-scripts.ps1

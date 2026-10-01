@@ -15,16 +15,29 @@ try {
     New-ItemProperty -Path 'IVReview:\Software\Classes\.jpg\OpenWithProgids' -Name OtherApp -Value '' | Out-Null
     New-Item -Path 'IVReview:\Software\Classes\.png' -Force | Out-Null
     Set-ItemProperty -Path 'IVReview:\Software\Classes\.png' -Name '(default)' -Value 'Original.Png'
+    $choice = 'IVReview:\Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\.jpg\UserChoice'
+    New-Item -Path $choice -Force | Out-Null
+    Set-ItemProperty -Path $choice -Name ProgId -Value 'Original.Jpg'
+    Set-ItemProperty -Path $choice -Name Hash -Value 'OriginalHash'
+    function Assert-AssociationsPreserved {
+        $jpgChoice = Get-ItemProperty -LiteralPath $choice
+        Assert-True ($jpgChoice.ProgId -eq 'Original.Jpg' -and $jpgChoice.Hash -eq 'OriginalHash') 'UserChoice was modified'
+        $png = Get-ItemProperty 'IVReview:\Software\Classes\.png'
+        Assert-True ($png.'(default)' -eq 'Original.Png') 'Original Classes default was modified'
+        $jpg = Get-ItemProperty 'IVReview:\Software\Classes\.jpg'
+        Assert-True ($jpg.PSObject.Properties.Name -notcontains '(default)') 'Absent Classes default was modified'
+        Assert-True (-not (Test-Path 'IVReview:\Software\Classes\.gif')) 'An absent extension key was created'
+    }
     $env:LOCALAPPDATA = $tempRoot
     $associate = [scriptblock]::Create((Get-Content (Join-Path $PSScriptRoot '..\scripts\associate.ps1') -Raw).Replace('HKCU:', 'IVReview:'))
     $unassociate = [scriptblock]::Create((Get-Content (Join-Path $PSScriptRoot '..\scripts\unassociate.ps1') -Raw).Replace('HKCU:', 'IVReview:'))
     $exe = (Get-Process -Id $PID).Path
     & $associate -ExePath $exe
-    $backup = Join-Path $tempRoot 'ImageViewer\assoc-backup\backup.xml'
-    $firstBackup = [IO.File]::ReadAllText($backup)
+    Assert-AssociationsPreserved
     & $associate -ExePath $exe
-    Assert-True ([IO.File]::ReadAllText($backup) -ceq $firstBackup) 'Repeat registration overwrote the original backup'
+    Assert-AssociationsPreserved
     & $unassociate
+    Assert-AssociationsPreserved
     Assert-True (Test-Path 'IVReview:\Software\Classes\.jpg\OpenWithProgids') 'Other-app subkey was deleted'
     $other = Get-ItemProperty 'IVReview:\Software\Classes\.jpg\OpenWithProgids'
     Assert-True ($other.PSObject.Properties.Name -contains 'OtherApp') 'Other-app value was deleted'
@@ -32,7 +45,6 @@ try {
     Assert-True ($jpg.PSObject.Properties.Name -notcontains '(default)') 'Viewer default was not removed'
     $png = Get-ItemProperty 'IVReview:\Software\Classes\.png'
     Assert-True ($png.'(default)' -eq 'Original.Png') 'Original default was not restored'
-    Assert-True (-not (Test-Path -LiteralPath $backup)) 'Consumed backup should be removed for the next registration cycle'
     Write-Output 'PASS: repeated registration, restoration, and preservation of other-app settings'
 } finally {
     $env:LOCALAPPDATA = $savedLocalAppData

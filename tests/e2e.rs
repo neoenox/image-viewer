@@ -361,44 +361,77 @@ fn numeric_filenames_sort_naturally() {
 
 #[test]
 fn assoc_register_status_unregister() {
-    // テスト専用のProgID・拡張子で登録→状態→解除を検証（本番の関連付けは触らない）。
     use image_viewer::assoc;
     use winreg::{enums::HKEY_CURRENT_USER, RegKey};
-
     let prog = "ImageViewerE2ETest";
     let app = "E2E Test App";
     let caps = r"Software\ImageViewerE2ETest\Capabilities";
     let ext = "imgviewtest";
+    let absent_ext = "imgviewabsenttest";
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-
-    let _ = assoc::unregister(prog, app, caps, "e2e-test.exe", &[ext]);
-    assert!(!assoc::is_default(ext, prog));
-
-    let exe = std::env::current_exe().unwrap();
-    assoc::register(prog, app, caps, &exe, &[ext]).unwrap();
-
-    // Classes既定が書かれていること
-    let cur: String = hkcu
-        .open_subkey(format!(r"Software\Classes\.{ext}"))
-        .unwrap()
-        .get_value("")
+    let classes = format!(r"Software\Classes\.{ext}");
+    let absent = format!(r"Software\Classes\.{absent_ext}");
+    hkcu.delete_subkey_all(&absent).ok();
+    let choice =
+        format!(r"Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\.{ext}\UserChoice");
+    let (key, _) = hkcu.create_subkey(&classes).unwrap();
+    key.set_value("", &"Original.App").unwrap();
+    let (key, _) = hkcu
+        .create_subkey(format!(r"{classes}\OpenWithProgids"))
         .unwrap();
-    assert_eq!(cur, prog);
-    // UserChoiceは触っていないので既定扱いにならない
-    assert!(!assoc::is_default(ext, prog));
-
-    assoc::unregister(prog, app, caps, "e2e-test.exe", &[ext]).unwrap();
+    key.set_value("Other.App", &"preserve").unwrap();
+    let (key, _) = hkcu.create_subkey(&choice).unwrap();
+    key.set_value("ProgId", &"Original.App").unwrap();
+    key.set_value("Hash", &"OriginalHash").unwrap();
+    let exe = std::env::current_exe().unwrap();
+    let exe_name = exe.file_name().unwrap().to_str().unwrap();
+    let check = || {
+        assert_eq!(
+            hkcu.open_subkey(&classes)
+                .unwrap()
+                .get_value::<String, _>("")
+                .unwrap(),
+            "Original.App"
+        );
+        assert_eq!(
+            hkcu.open_subkey(&choice)
+                .unwrap()
+                .get_value::<String, _>("ProgId")
+                .unwrap(),
+            "Original.App"
+        );
+        assert_eq!(
+            hkcu.open_subkey(&choice)
+                .unwrap()
+                .get_value::<String, _>("Hash")
+                .unwrap(),
+            "OriginalHash"
+        );
+        assert_eq!(
+            hkcu.open_subkey(format!(r"{classes}\OpenWithProgids"))
+                .unwrap()
+                .get_value::<String, _>("Other.App")
+                .unwrap(),
+            "preserve"
+        );
+        assert!(hkcu.open_subkey(&absent).is_err());
+    };
+    for _ in 0..2 {
+        assoc::register(prog, app, caps, &exe, &[ext, absent_ext]).unwrap();
+        check();
+    }
+    assoc::unregister(prog, app, caps, exe_name).unwrap();
+    check();
     assert!(hkcu
         .open_subkey(format!(r"Software\Classes\{prog}"))
         .is_err());
     assert!(hkcu.open_subkey(caps).is_err());
-    let cur: Option<String> = hkcu
-        .open_subkey(format!(r"Software\Classes\.{ext}"))
-        .ok()
-        .and_then(|k| k.get_value("").ok());
-    assert_ne!(cur.as_deref(), Some(prog));
+    hkcu.delete_subkey_all(&classes).unwrap();
+    hkcu.delete_subkey_all(format!(
+        r"Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\.{ext}"
+    ))
+    .unwrap();
 }
-
 fn send_wheel(ctx: &egui::Context, app: &mut ViewerApp, dy: f32) {
     let mut raw = egui::RawInput::default();
     raw.events.push(egui::Event::MouseWheel {

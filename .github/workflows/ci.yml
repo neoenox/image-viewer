@@ -24,6 +24,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Run tests
         run: cargo test --locked --all-targets
+      - name: Test association scripts without changing user defaults
+        run: powershell -NoProfile -File tests/association-scripts.ps1
 
   clippy:
     runs-on: windows-latest
