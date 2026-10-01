@@ -330,7 +330,6 @@ pub struct ViewerApp {
     status_msg: String,
     pan_offset: egui::Vec2,
     wheel_accum: f32,
-    last_wheel_nav: Option<Instant>,
     view_avail: egui::Vec2,
     view_img: egui::Vec2,
     peek_saved: Option<PeekState>,
@@ -367,7 +366,6 @@ impl ViewerApp {
             status_msg: String::new(),
             pan_offset: egui::Vec2::ZERO,
             wheel_accum: 0.0,
-            last_wheel_nav: None,
             view_avail: egui::vec2(1000.0, 700.0),
             view_img: egui::vec2(800.0, 600.0),
             peek_saved: None,
@@ -833,9 +831,9 @@ impl ViewerApp {
         }
     }
 
-    /// ホイールで前後画像へ移動（1ノッチ=±40で1枚）。
+    /// ホイールで前後画像へ移動。生デルタを使い1ノッチ=1枚に即応する。
     /// 中ボタン押下中の誤回転では移動しない。
-    fn handle_wheel_nav(&mut self, ctx: &egui::Context) {
+    pub fn handle_wheel_nav(&mut self, ctx: &egui::Context) {
         if self.files.len() < 2 {
             self.wheel_accum = 0.0;
             return;
@@ -844,27 +842,21 @@ impl ViewerApp {
             self.wheel_accum = 0.0;
             return;
         }
-        let y = ctx.input(|i| i.smooth_scroll_delta.y);
+        // smoothは複数フレームに分散して遅く感じるためrawを使う。
+        // 1ノッチ≒±40なので、しきい値20で確実に1枚進む。
+        let y = ctx.input(|i| i.raw_scroll_delta.y);
         if y == 0.0 {
             return;
         }
-        if let Some(t) = self.last_wheel_nav {
-            if t.elapsed() < Duration::from_millis(150) {
-                self.wheel_accum = 0.0;
-                return;
-            }
-        }
         self.wheel_accum += y;
-        if self.wheel_accum <= -40.0 {
+        if self.wheel_accum <= -20.0 {
             // 手前（下）回し = 次へ
             self.next(ctx);
             self.wheel_accum = 0.0;
-            self.last_wheel_nav = Some(Instant::now());
-        } else if self.wheel_accum >= 40.0 {
+        } else if self.wheel_accum >= 20.0 {
             // 奥（上）回し = 前へ
             self.prev(ctx);
             self.wheel_accum = 0.0;
-            self.last_wheel_nav = Some(Instant::now());
         }
     }
 

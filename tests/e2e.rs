@@ -399,6 +399,36 @@ fn assoc_register_status_unregister() {
     assert_ne!(cur.as_deref(), Some(prog));
 }
 
+fn send_wheel(ctx: &egui::Context, app: &mut ViewerApp, dy: f32) {
+    let mut raw = egui::RawInput::default();
+    raw.events.push(egui::Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Line,
+        delta: egui::vec2(0.0, dy),
+        modifiers: egui::Modifiers::default(),
+    });
+    ctx.begin_pass(raw);
+    app.handle_wheel_nav(ctx);
+    let _ = ctx.end_pass();
+}
+
+#[test]
+fn wheel_nav_one_notch_one_image() {
+    // 合成ホイールイベント1ノッチでちょうど1枚進む/戻ること。
+    let dir = fixture_dir("wheel");
+    let ctx = headless_ctx();
+    let mut app = ViewerApp::new(None);
+    app.open_path(dir.join("a.png"), Some(&ctx));
+    assert_eq!(app.index(), 0);
+
+    send_wheel(&ctx, &mut app, -1.0); // 下回し = 次へ
+    assert_eq!(app.index(), 1);
+    send_wheel(&ctx, &mut app, -1.0);
+    assert_eq!(app.index(), 2);
+    send_wheel(&ctx, &mut app, 1.0); // 上回し = 前へ
+    assert_eq!(app.index(), 1);
+    cleanup(&dir);
+}
+
 #[test]
 fn empty_app_operations_are_safe() {
     let ctx = headless_ctx();
