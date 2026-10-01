@@ -360,6 +360,46 @@ fn numeric_filenames_sort_naturally() {
 }
 
 #[test]
+fn assoc_register_status_unregister() {
+    // テスト専用のProgID・拡張子で登録→状態→解除を検証（本番の関連付けは触らない）。
+    use image_viewer::assoc;
+    use winreg::{enums::HKEY_CURRENT_USER, RegKey};
+
+    let prog = "ImageViewerE2ETest";
+    let app = "E2E Test App";
+    let caps = r"Software\ImageViewerE2ETest\Capabilities";
+    let ext = "imgviewtest";
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+
+    let _ = assoc::unregister(prog, app, caps, "e2e-test.exe", &[ext]);
+    assert!(!assoc::is_default(ext, prog));
+
+    let exe = std::env::current_exe().unwrap();
+    assoc::register(prog, app, caps, &exe, &[ext]).unwrap();
+
+    // Classes既定が書かれていること
+    let cur: String = hkcu
+        .open_subkey(format!(r"Software\Classes\.{ext}"))
+        .unwrap()
+        .get_value("")
+        .unwrap();
+    assert_eq!(cur, prog);
+    // UserChoiceは触っていないので既定扱いにならない
+    assert!(!assoc::is_default(ext, prog));
+
+    assoc::unregister(prog, app, caps, "e2e-test.exe", &[ext]).unwrap();
+    assert!(hkcu
+        .open_subkey(format!(r"Software\Classes\{prog}"))
+        .is_err());
+    assert!(hkcu.open_subkey(caps).is_err());
+    let cur: Option<String> = hkcu
+        .open_subkey(format!(r"Software\Classes\.{ext}"))
+        .ok()
+        .and_then(|k| k.get_value("").ok());
+    assert_ne!(cur.as_deref(), Some(prog));
+}
+
+#[test]
 fn empty_app_operations_are_safe() {
     let ctx = headless_ctx();
     let mut app = ViewerApp::new(None);

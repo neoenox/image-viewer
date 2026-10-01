@@ -5,7 +5,9 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 
-const SUPPORTED_EXTS: &[&str] = &[
+pub mod assoc;
+
+pub const SUPPORTED_EXTS: &[&str] = &[
     "jpg", "jpeg", "png", "gif", "bmp", "webp", "tif", "tiff", "ico", "dds", "hdr", "exr", "qoi",
     "pbm", "pgm", "ppm", "pam",
 ];
@@ -335,6 +337,8 @@ pub struct ViewerApp {
     loader: ImageLoader,
     tex_cap: usize,
     orig_dims: Option<(u32, u32)>,
+    show_assoc: bool,
+    assoc_status: Vec<(String, bool)>,
 }
 
 /// 中ボタン押下中の等倍覗き見（ルーペ）用に退避する表示状態。
@@ -370,6 +374,8 @@ impl ViewerApp {
             loader: ImageLoader::new(),
             tex_cap: 2048,
             orig_dims: None,
+            show_assoc: false,
+            assoc_status: Vec::new(),
         };
         if let Some(p) = initial {
             if p.is_dir() {
@@ -719,6 +725,14 @@ impl ViewerApp {
         self.loader.is_cached(path)
     }
 
+    /// 関連付けダイアログ用に各拡張子の既定状態を読み直す。
+    pub fn refresh_assoc_status(&mut self) {
+        self.assoc_status = SUPPORTED_EXTS
+            .iter()
+            .map(|e| (e.to_string(), assoc::is_default(e, assoc::PROG_ID)))
+            .collect();
+    }
+
     fn open_dialog(&mut self, ctx: &egui::Context) {
         let mut dlg = rfd::FileDialog::new().set_title("画像を開く");
         dlg = dlg.add_filter("画像", SUPPORTED_EXTS);
@@ -960,6 +974,10 @@ impl eframe::App for ViewerApp {
                     self.fullscreen = !self.fullscreen;
                     ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.fullscreen));
                 }
+                if ui.button("関連付け").clicked() {
+                    self.refresh_assoc_status();
+                    self.show_assoc = true;
+                }
             });
         });
 
@@ -1070,6 +1088,67 @@ impl eframe::App for ViewerApp {
             let img_rect = egui::Rect::from_center_size(center, disp);
             ui.put(img_rect, egui::Image::new(&handle).fit_to_exact_size(disp));
         });
+
+        // ---- 関連付けダイアログ ----
+        if self.show_assoc {
+            let mut open = true;
+            egui::Window::new("ファイル関連付け")
+                .open(&mut open)
+                .resizable(false)
+                .show(ctx, |ui| {
+                    ui.label("画像形式とこのアプリを関連付けます（管理者権限不要）。");
+                    ui.horizontal(|ui| {
+                        if ui.button("関連付けを登録").clicked() {
+                            if let Ok(exe) = assoc::exe_path() {
+                                let _ = assoc::register(
+                                    assoc::PROG_ID,
+                                    assoc::APP_NAME,
+                                    assoc::CAPS_BASE,
+                                    &exe,
+                                    SUPPORTED_EXTS,
+                                );
+                            }
+                            self.refresh_assoc_status();
+                        }
+                        if ui.button("設定画面を開く").clicked() {
+                            let _ = assoc::open_default_apps();
+                        }
+                        if ui.button("登録を解除").clicked() {
+                            if let Ok(exe) = assoc::exe_path() {
+                                let name = exe
+                                    .file_name()
+                                    .map(|s| s.to_string_lossy().into_owned())
+                                    .unwrap_or_else(|| "image-viewer.exe".to_owned());
+                                let _ = assoc::unregister(
+                                    assoc::PROG_ID,
+                                    assoc::APP_NAME,
+                                    assoc::CAPS_BASE,
+                                    &name,
+                                    SUPPORTED_EXTS,
+                                );
+                            }
+                            self.refresh_assoc_status();
+                        }
+                    });
+                    ui.small("済=ダブルクリックで開く / 未=未設定。「登録」→「設定画面を開く」の順で確定。");
+                    ui.separator();
+                    egui::ScrollArea::vertical()
+                        .max_height(300.0)
+                        .show(ui, |ui| {
+                            for (ext, done) in &self.assoc_status {
+                                ui.horizontal(|ui| {
+                                    if *done {
+                                        ui.colored_label(egui::Color32::GREEN, "済");
+                                    } else {
+                                        ui.colored_label(egui::Color32::GRAY, "未");
+                                    }
+                                    ui.label(format!(".{ext}"));
+                                });
+                            }
+                        });
+                });
+            self.show_assoc = open;
+        }
     }
 }
 
