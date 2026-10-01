@@ -136,6 +136,10 @@ pub fn collect_siblings(path: &Path) -> Vec<PathBuf> {
         Err(_) => return vec![path.to_path_buf()],
     };
     sort_image_files(&mut files);
+    if !files.iter().any(|p| p == path) {
+        files.push(path.to_path_buf());
+        sort_image_files(&mut files);
+    }
     if files.is_empty() {
         vec![path.to_path_buf()]
     } else {
@@ -354,6 +358,7 @@ pub struct ViewerApp {
     index: usize,
     base: Option<image::RgbaImage>,
     texture: Option<egui::TextureHandle>,
+    detail_tiles: Vec<(egui::TextureHandle, egui::Rect)>,
     load_error: Option<String>,
     zoom: f32,
     fit: bool,
@@ -390,6 +395,7 @@ impl ViewerApp {
             index: 0,
             base: None,
             texture: None,
+            detail_tiles: Vec::new(),
             load_error: None,
             zoom: 1.0,
             fit: true,
@@ -467,6 +473,7 @@ impl ViewerApp {
     }
 
     fn load_current(&mut self, ctx: Option<&egui::Context>) {
+        self.detail_tiles.clear();
         self.load_error = None;
         self.texture = None;
         self.base = None;
@@ -516,7 +523,7 @@ impl ViewerApp {
         let next = at(self.index + 1);
         let prev = at(self.index + n - 1);
         let next2 = at(self.index + 2);
-        let prev2 = at(self.index + n - 2);
+        let prev2 = at((self.index + n - (2 % n)) % n);
         let current = self.files[self.index].clone();
         self.loader.prune(&[
             current,
@@ -569,6 +576,7 @@ impl ViewerApp {
             return;
         }
         self.rotation = (self.rotation + 1) % 4;
+        self.detail_tiles.clear();
         self.rebuild_texture(ctx);
     }
 
@@ -577,6 +585,7 @@ impl ViewerApp {
             return;
         }
         self.rotation = (self.rotation + 3) % 4;
+        self.detail_tiles.clear();
         self.rebuild_texture(ctx);
     }
 
@@ -628,10 +637,7 @@ impl ViewerApp {
         // カーソル下の点が動かないようパンを補正
         let k = 1.0 - new_scale / old_scale;
         self.pan_offset += (cursor - center) * k;
-        let disp = egui::vec2(
-            (iw * new_scale).clamp(1.0, 20000.0),
-            (ih * new_scale).clamp(1.0, 20000.0),
-        );
+        let disp = egui::vec2((iw * new_scale).max(1.0), (ih * new_scale).max(1.0));
         self.clamp_pan(avail, disp);
     }
 
@@ -750,6 +756,60 @@ impl ViewerApp {
     }
     pub fn image_dims(&self) -> Option<(u32, u32)> {
         self.orig_dims
+    }
+
+    /// 表示倍率の基準は縮小テクスチャではなく元画像の寸法。
+    pub fn display_image_size(&self) -> Option<egui::Vec2> {
+        let (w, h) = self.orig_dims?;
+        let (w, h) = if self.rotation % 2 == 1 {
+            (h, w)
+        } else {
+            (w, h)
+        };
+        Some(egui::vec2(w as f32, h as f32))
+    }
+
+    /// GPU上限を超える画像も原寸の細部を表示できるよう、必要時にタイル化する。
+    fn ensure_detail_tiles(&mut self, ctx: &egui::Context) -> image::ImageResult<()> {
+        if !self.detail_tiles.is_empty() {
+            return Ok(());
+        }
+        let Some(path) = self.current_path() else {
+            return Ok(());
+        };
+        let original = decode_image(path)?.to_rgba8();
+        if self.base.as_ref().map(|base| base.dimensions()) == Some(original.dimensions()) {
+            return Ok(());
+        }
+        let original = match self.rotation {
+            1 => image::imageops::rotate90(&original),
+            2 => image::imageops::rotate180(&original),
+            3 => image::imageops::rotate270(&original),
+            _ => original,
+        };
+        let cap = self.tex_cap as u32;
+        for y in (0..original.height()).step_by(cap as usize) {
+            for x in (0..original.width()).step_by(cap as usize) {
+                let w = cap.min(original.width() - x);
+                let h = cap.min(original.height() - y);
+                let tile = image::imageops::crop_imm(&original, x, y, w, h).to_image();
+                let color = egui::ColorImage::from_rgba_unmultiplied(
+                    [w as usize, h as usize],
+                    tile.as_raw(),
+                );
+                let texture = ctx.load_texture(
+                    format!("detail-{x}-{y}"),
+                    color,
+                    egui::TextureOptions::LINEAR,
+                );
+                let rect = egui::Rect::from_min_size(
+                    egui::pos2(x as f32, y as f32),
+                    egui::vec2(w as f32, h as f32),
+                );
+                self.detail_tiles.push((texture, rect));
+            }
+        }
+        Ok(())
     }
     pub fn pan(&self) -> egui::Vec2 {
         self.pan_offset
@@ -1106,10 +1166,8 @@ impl eframe::App for ViewerApp {
 
             let view_rect = ui.available_rect_before_wrap();
             let avail = view_rect.size();
-            let (iw, ih) = {
-                let s = handle.size();
-                (s[0] as f32, s[1] as f32)
-            };
+            let size = self.display_image_size().unwrap();
+            let (iw, ih) = (size.x, size.y);
             self.view_avail = avail;
             self.view_img = egui::vec2(iw, ih);
 
@@ -1127,10 +1185,16 @@ impl eframe::App for ViewerApp {
 
             // 描画サイズ
             let scale = self.current_scale(avail, iw, ih);
-            let disp = egui::vec2(
-                (iw * scale).clamp(1.0, 20000.0),
-                (ih * scale).clamp(1.0, 20000.0),
-            );
+            if !self.fit && scale >= 1.0 && self.detail_tiles.is_empty() {
+                let base = self.base.as_ref().unwrap();
+                let (ow, oh) = self.orig_dims.unwrap();
+                if ow > base.width() || oh > base.height() {
+                    if let Err(err) = self.ensure_detail_tiles(ctx) {
+                        self.load_error = Some(format!("原寸画像を開けませんでした: {err}"));
+                    }
+                }
+            }
+            let disp = egui::vec2((iw * scale).max(1.0), (ih * scale).max(1.0));
 
             // マウス位置連動で視点移動（ドラッグ不要）。
             // 右端に寄せると画像右側、左端で左側が見える。覗き見中も追従する。
@@ -1145,7 +1209,22 @@ impl eframe::App for ViewerApp {
             self.clamp_pan(avail, disp);
             let center = view_rect.center() + self.pan_offset;
             let img_rect = egui::Rect::from_center_size(center, disp);
-            ui.put(img_rect, egui::Image::new(&handle).fit_to_exact_size(disp));
+            if !self.fit && !self.detail_tiles.is_empty() {
+                for (tile, rect) in &self.detail_tiles {
+                    let dest = egui::Rect::from_min_max(
+                        img_rect.min + rect.min.to_vec2() * scale,
+                        img_rect.min + rect.max.to_vec2() * scale,
+                    );
+                    ui.painter().image(
+                        tile.id(),
+                        dest,
+                        egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+                        egui::Color32::WHITE,
+                    );
+                }
+            } else {
+                ui.put(img_rect, egui::Image::new(&handle).fit_to_exact_size(disp));
+            }
         });
 
         // ---- 関連付けダイアログ ----
@@ -1434,5 +1513,64 @@ mod tests {
         let tiny = image::RgbaImage::from_pixel(100, 80, image::Rgba([1, 2, 3, 255]));
         let same = downscale_to_cap(tiny, 2048);
         assert_eq!((same.width(), same.height()), (100, 80));
+    }
+
+    #[test]
+    fn detail_tiles_cover_original_and_rotated_image() {
+        let dir = std::env::temp_dir().join(format!("image-viewer-detail-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("original.png");
+        image::RgbaImage::from_fn(1400, 1200, |x, y| {
+            image::Rgba([(x % 256) as u8, (y % 256) as u8, 99, 255])
+        })
+        .save(&path)
+        .unwrap();
+        let ctx = egui::Context::default();
+        let _ = ctx.run(
+            egui::RawInput {
+                max_texture_side: Some(1024),
+                ..Default::default()
+            },
+            |_| {},
+        );
+        let mut app = ViewerApp::new(None);
+        app.tex_cap = 1024;
+        app.open_path(path, Some(&ctx));
+        app.ensure_detail_tiles(&ctx).unwrap();
+        assert_eq!(app.detail_tiles.len(), 4);
+        for (texture, rect) in &app.detail_tiles {
+            assert_eq!(
+                texture.size(),
+                [rect.width() as usize, rect.height() as usize]
+            );
+            assert!(texture.size().iter().all(|s| *s <= 1024));
+        }
+        let area: f32 = app.detail_tiles.iter().map(|(_, rect)| rect.area()).sum();
+        assert_eq!(area, 1400.0 * 1200.0);
+        assert_eq!(
+            app.detail_tiles.last().unwrap().1.max,
+            egui::pos2(1400.0, 1200.0)
+        );
+        let output = ctx.run(egui::RawInput::default(), |_| {});
+        let edge = app.detail_tiles.last().unwrap().0.id();
+        let (_, delta) = output
+            .textures_delta
+            .set
+            .iter()
+            .find(|(id, _)| *id == edge)
+            .unwrap();
+        let egui::ImageData::Color(color) = &delta.image;
+        assert_eq!(
+            color.pixels[0],
+            egui::Color32::from_rgba_unmultiplied(0, 0, 99, 255)
+        );
+        app.rotate_cw(&ctx);
+        assert!(app.detail_tiles.is_empty());
+        app.ensure_detail_tiles(&ctx).unwrap();
+        assert_eq!(
+            app.detail_tiles.last().unwrap().1.max,
+            egui::pos2(1200.0, 1400.0)
+        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

@@ -449,3 +449,53 @@ fn jp_font_setup_does_not_panic() {
     let ctx = headless_ctx();
     setup_jp_font(&ctx);
 }
+
+#[test]
+fn single_image_opens_and_navigates() {
+    let dir = std::env::temp_dir().join(format!("image-viewer-single-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("only.png");
+    image::RgbaImage::new(4, 4).save(&path).unwrap();
+    let ctx = headless_ctx();
+    let mut app = ViewerApp::new(Some(path.clone()));
+    app.next(&ctx);
+    app.prev(&ctx);
+    assert_eq!(app.current_path(), Some(path.as_path()));
+    assert!(app.has_texture());
+    cleanup(&dir);
+}
+
+#[test]
+fn explicit_image_with_nonstandard_extension_is_preserved() {
+    let dir = fixture_dir("explicit");
+    let path = dir.join("chosen.bin");
+    image::RgbaImage::new(8, 8)
+        .save_with_format(&path, image::ImageFormat::Png)
+        .unwrap();
+    let app = ViewerApp::new(Some(path.clone()));
+    assert_eq!(app.current_path(), Some(path.as_path()));
+    assert_eq!(app.image_dims(), Some((8, 8)));
+    assert_eq!(app.file_count(), 6);
+    cleanup(&dir);
+}
+
+#[test]
+fn original_size_drives_zoom_and_rotation() {
+    let dir = fixture_dir("originalzoom");
+    let ctx = headless_ctx();
+    let mut app = ViewerApp::new(None);
+    app.open_path(dir.join("z-big.jpg"), Some(&ctx));
+    assert_eq!(app.texture_size(), Some([2048, 1365]));
+    assert_eq!(app.display_image_size(), Some(egui::vec2(3000.0, 2000.0)));
+    let size = app.display_image_size().unwrap();
+    assert!(app.begin_peek(egui::vec2(1000.0, 700.0), size.x, size.y));
+    assert_eq!(
+        app.current_scale(egui::vec2(1000.0, 700.0), size.x, size.y),
+        1.0
+    );
+    assert_eq!(size * app.zoom_level(), egui::vec2(3000.0, 2000.0));
+    app.end_peek();
+    app.rotate_cw(&ctx);
+    assert_eq!(app.display_image_size(), Some(egui::vec2(2000.0, 3000.0)));
+    cleanup(&dir);
+}
