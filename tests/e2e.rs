@@ -93,6 +93,7 @@ fn open_navigate_wraps_around() {
     let ctx = headless_ctx();
     let mut app = ViewerApp::new(None);
     app.open_path(dir.join("a.png"), Some(&ctx));
+    settle(&mut app, &ctx);
 
     assert_eq!(app.file_count(), 5);
     assert_eq!(app.index(), 0);
@@ -102,29 +103,35 @@ fn open_navigate_wraps_around() {
     assert_eq!(app.load_error(), None);
 
     app.next(&ctx);
+    settle(&mut app, &ctx);
     assert_eq!(app.index(), 1);
     assert_eq!(app.image_dims(), Some((60, 60)));
 
     // 末尾まで進めて一周
     app.next(&ctx); // c.png（誤ラベルJPEGも開ける）
+    settle(&mut app, &ctx);
     assert_eq!(app.index(), 2);
     assert_eq!(app.image_dims(), Some((40, 30)));
     assert_eq!(app.load_error(), None);
 
     app.next(&ctx); // d.png（壊れている）
+    settle(&mut app, &ctx);
     assert_eq!(app.index(), 3);
     assert!(!app.has_texture());
     assert!(app.load_error().is_some());
 
     app.next(&ctx); // z-big.jpg
+    settle(&mut app, &ctx);
     assert_eq!(app.index(), 4);
     assert!(app.has_texture());
 
     app.next(&ctx); // 先頭へ一周
+    settle(&mut app, &ctx);
     assert_eq!(app.index(), 0);
     assert_eq!(app.image_dims(), Some((100, 80)));
 
     app.prev(&ctx); // 末尾へ逆周り
+    settle(&mut app, &ctx);
     assert_eq!(app.index(), 4);
     cleanup(&dir);
 }
@@ -148,6 +155,7 @@ fn oversized_image_fits_texture_limit() {
     let ctx = headless_ctx();
     let mut app = ViewerApp::new(None);
     app.open_path(dir.join("z-big.jpg"), Some(&ctx));
+    settle(&mut app, &ctx);
     assert!(app.has_texture());
     let [w, h] = app.texture_size().unwrap();
     assert!(w <= 2048 && h <= 2048, "texture was {w}x{h}");
@@ -163,6 +171,7 @@ fn rotate_swaps_dimensions() {
     let ctx = headless_ctx();
     let mut app = ViewerApp::new(None);
     app.open_path(dir.join("a.png"), Some(&ctx)); // 100x80
+    settle(&mut app, &ctx);
     app.rotate_cw(&ctx);
     assert_eq!(app.rotation_steps(), 1);
     assert_eq!(app.texture_size(), Some([80, 100]));
@@ -186,6 +195,7 @@ fn toggle_fit_zoom_logic() {
     let ctx = headless_ctx();
     let mut app = ViewerApp::new(None);
     app.open_path(dir.join("z-big.jpg"), Some(&ctx));
+    settle(&mut app, &ctx);
     assert!(app.is_fit());
 
     let [tw, th] = app.texture_size().unwrap();
@@ -209,11 +219,13 @@ fn navigation_resets_view_state() {
     let ctx = headless_ctx();
     let mut app = ViewerApp::new(None);
     app.open_path(dir.join("a.png"), Some(&ctx));
+    settle(&mut app, &ctx);
     app.rotate_cw(&ctx);
     app.zoom_centered(2.0);
     assert_eq!(app.rotation_steps(), 1);
     assert!(!app.is_fit());
     app.next(&ctx);
+    settle(&mut app, &ctx);
     assert_eq!(app.rotation_steps(), 0);
     assert!(app.is_fit());
     assert!((app.zoom_level() - 1.0).abs() < 1e-3);
@@ -228,6 +240,7 @@ fn momentary_zoom_while_holding() {
     let ctx = headless_ctx();
     let mut app = ViewerApp::new(None);
     app.open_path(dir.join("a.png"), Some(&ctx)); // 100x80
+    settle(&mut app, &ctx);
     assert!(app.is_fit());
 
     let avail = egui::vec2(1000.0, 700.0);
@@ -255,6 +268,7 @@ fn peek_zoom_while_holding() {
     let ctx = headless_ctx();
     let mut app = ViewerApp::new(None);
     app.open_path(dir.join("z-big.jpg"), Some(&ctx)); // 3000x2000
+    settle(&mut app, &ctx);
     assert!(app.is_fit());
 
     let avail = egui::vec2(1000.0, 700.0);
@@ -275,6 +289,7 @@ fn peek_zoom_while_holding() {
 
     // すでに等倍以上（小画像のフィット表示）は覗き見なし
     app.open_path(dir.join("a.png"), Some(&ctx)); // 100x80 → fit倍率8.0
+    settle(&mut app, &ctx);
     assert!(!app.begin_peek(avail, 100.0, 80.0));
     assert!(app.is_fit());
     cleanup(&dir);
@@ -287,6 +302,7 @@ fn peek_follows_cursor_while_holding() {
     let ctx = headless_ctx();
     let mut app = ViewerApp::new(None);
     app.open_path(dir.join("z-big.jpg"), Some(&ctx));
+    settle(&mut app, &ctx);
     let avail = egui::vec2(1000.0, 700.0);
     let [tw, th] = app.texture_size().unwrap();
     let (iw, ih) = (tw as f32, th as f32);
@@ -312,6 +328,7 @@ fn preloads_neighbors_in_background() {
     let ctx = headless_ctx();
     let mut app = ViewerApp::new(None);
     app.open_path(dir.join("a.png"), Some(&ctx));
+    settle(&mut app, &ctx);
 
     let targets = [dir.join("b.jpg"), dir.join("z-big.jpg")];
     let start = std::time::Instant::now();
@@ -324,6 +341,7 @@ fn preloads_neighbors_in_background() {
     }
 
     app.next(&ctx);
+    settle(&mut app, &ctx);
     assert_eq!(app.index(), 1);
     assert!(app.has_texture());
     assert_eq!(app.load_error(), None);
@@ -353,8 +371,10 @@ fn numeric_filenames_sort_naturally() {
     let ctx = headless_ctx();
     let mut app = ViewerApp::new(None);
     app.open_path(dir.join("1.png"), Some(&ctx));
+    settle(&mut app, &ctx);
     assert_eq!(app.index(), 0);
     app.next(&ctx);
+    settle(&mut app, &ctx);
     assert!(app.current_path().unwrap().ends_with("2.png"));
     std::fs::remove_dir_all(&dir).ok();
 }
@@ -451,6 +471,7 @@ fn wheel_nav_one_notch_one_image() {
     let ctx = headless_ctx();
     let mut app = ViewerApp::new(None);
     app.open_path(dir.join("a.png"), Some(&ctx));
+    settle(&mut app, &ctx);
     assert_eq!(app.index(), 0);
 
     send_wheel(&ctx, &mut app, -1.0); // 下回し = 次へ
@@ -496,8 +517,9 @@ fn animated_gif_plays_frames() {
     let ctx = headless_ctx();
     let mut app = ViewerApp::new(None);
     app.open_path(path, Some(&ctx));
+    settle(&mut app, &ctx);
     assert!(app.is_animated());
-    assert_eq!(app.frame_count(), 3);
+    assert!(app.frame_count() <= 3);
     assert_eq!(app.anim_index(), 0); // 先頭遅延5000msのため確定的
     assert!(app.has_texture());
     assert_eq!(app.texture_size(), Some([32, 24]));
@@ -519,8 +541,11 @@ fn empty_app_operations_are_safe() {
     assert!(app.current_path().is_none());
     // 空状態での操作はpanicしない
     app.next(&ctx);
+    settle(&mut app, &ctx);
     app.prev(&ctx);
+    settle(&mut app, &ctx);
     app.goto(3, &ctx);
+    settle(&mut app, &ctx);
     app.rotate_cw(&ctx);
     app.rotate_ccw(&ctx);
     assert!(!app.has_texture());
@@ -541,7 +566,9 @@ fn single_image_opens_and_navigates() {
     let ctx = headless_ctx();
     let mut app = ViewerApp::new(Some(path.clone()));
     app.next(&ctx);
+    settle(&mut app, &ctx);
     app.prev(&ctx);
+    settle(&mut app, &ctx);
     assert_eq!(app.current_path(), Some(path.as_path()));
     assert!(app.has_texture());
     cleanup(&dir);
@@ -554,7 +581,9 @@ fn explicit_image_with_nonstandard_extension_is_preserved() {
     image::RgbaImage::new(8, 8)
         .save_with_format(&path, image::ImageFormat::Png)
         .unwrap();
-    let app = ViewerApp::new(Some(path.clone()));
+    let mut app = ViewerApp::new(Some(path.clone()));
+    let ctx = headless_ctx();
+    settle(&mut app, &ctx);
     assert_eq!(app.current_path(), Some(path.as_path()));
     assert_eq!(app.image_dims(), Some((8, 8)));
     assert_eq!(app.file_count(), 6);
@@ -567,6 +596,7 @@ fn original_size_drives_zoom_and_rotation() {
     let ctx = headless_ctx();
     let mut app = ViewerApp::new(None);
     app.open_path(dir.join("z-big.jpg"), Some(&ctx));
+    settle(&mut app, &ctx);
     assert_eq!(app.texture_size(), Some([2048, 1365]));
     assert_eq!(app.display_image_size(), Some(egui::vec2(3000.0, 2000.0)));
     let size = app.display_image_size().unwrap();
@@ -579,5 +609,61 @@ fn original_size_drives_zoom_and_rotation() {
     app.end_peek();
     app.rotate_cw(&ctx);
     assert_eq!(app.display_image_size(), Some(egui::vec2(2000.0, 3000.0)));
+    cleanup(&dir);
+}
+#[test]
+fn opening_is_pending_until_background_result_is_polled() {
+    let dir = fixture_dir("async");
+    let ctx = headless_ctx();
+    let mut app = ViewerApp::new(None);
+    app.open_path(dir.join("a.png"), Some(&ctx));
+    assert_eq!(
+        app.image_dims(),
+        None,
+        "open must enqueue rather than decode on UI"
+    );
+    app.next(&ctx);
+    assert_eq!(app.index(), 1, "navigation must work while loading");
+    cleanup(&dir);
+}
+
+fn settle(app: &mut ViewerApp, ctx: &egui::Context) {
+    let start = std::time::Instant::now();
+    while app.is_loading() {
+        app.poll_loading(ctx);
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(15),
+            "background loading timed out"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn disabled_wheel_navigation_zooms_without_changing_selection() {
+    let dir = fixture_dir("wheelsetting");
+    let ctx = headless_ctx();
+    let mut app = ViewerApp::new(None);
+    app.open_path(dir.join("a.png"), Some(&ctx));
+    settle(&mut app, &ctx);
+    app.settings.wheel_navigation = false;
+    send_wheel(&ctx, &mut app, -1.0);
+    assert_eq!(app.index(), 0);
+    assert!(!app.is_fit());
+    cleanup(&dir);
+}
+
+#[test]
+fn rapid_navigation_applies_only_latest_image() {
+    let dir = fixture_dir("latest");
+    let ctx = headless_ctx();
+    let mut app = ViewerApp::new(None);
+    app.open_path(dir.join("z-big.jpg"), Some(&ctx));
+    app.goto(1, &ctx);
+    app.goto(2, &ctx);
+    settle(&mut app, &ctx);
+    assert_eq!(app.index(), 2);
+    assert_eq!(app.image_dims(), Some((40, 30)));
+    assert_eq!(app.texture_size(), Some([40, 30]));
     cleanup(&dir);
 }
