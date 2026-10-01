@@ -463,6 +463,55 @@ fn wheel_nav_one_notch_one_image() {
 }
 
 #[test]
+fn animated_gif_plays_frames() {
+    use image::codecs::gif::{GifEncoder, Repeat};
+
+    let dir = std::env::temp_dir().join(format!("image-viewer-e2e-{}-animgif", std::process::id()));
+    if dir.exists() {
+        std::fs::remove_dir_all(&dir).ok();
+    }
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // 3フレーム・遅延5000/100/100msのアニメGIFを生成
+    let path = dir.join("anim.gif");
+    let file = std::fs::File::create(&path).unwrap();
+    let mut enc = GifEncoder::new(file);
+    enc.set_repeat(Repeat::Infinite).unwrap();
+    let mk = |rgb: [u8; 3], ms: u32| {
+        let mut buf =
+            image::RgbaImage::from_pixel(32, 24, image::Rgba([rgb[0], rgb[1], rgb[2], 255]));
+        // 念のため全ピクセル不透明（合成の確定性用）
+        for p in buf.pixels_mut() {
+            p.0[3] = 255;
+        }
+        image::Frame::from_parts(buf, 0, 0, image::Delay::from_numer_denom_ms(ms, 1))
+    };
+    enc.encode_frames(vec![
+        mk([200, 30, 30], 5000),
+        mk([30, 200, 30], 100),
+        mk([30, 30, 200], 100),
+    ])
+    .unwrap();
+
+    let ctx = headless_ctx();
+    let mut app = ViewerApp::new(None);
+    app.open_path(path, Some(&ctx));
+    assert!(app.is_animated());
+    assert_eq!(app.frame_count(), 3);
+    assert_eq!(app.anim_index(), 0); // 先頭遅延5000msのため確定的
+    assert!(app.has_texture());
+    assert_eq!(app.texture_size(), Some([32, 24]));
+    assert_eq!(app.image_dims(), Some((32, 24)));
+
+    // 回転してもアニメ継続・寸法入替
+    app.rotate_cw(&ctx);
+    assert!(app.is_animated());
+    assert_eq!(app.texture_size(), Some([24, 32]));
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn empty_app_operations_are_safe() {
     let ctx = headless_ctx();
     let mut app = ViewerApp::new(None);

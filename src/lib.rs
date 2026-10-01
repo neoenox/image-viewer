@@ -4,6 +4,7 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use eframe::egui;
+use image::AnimationDecoder as _;
 
 pub mod assoc;
 
@@ -155,6 +156,82 @@ pub fn first_image_in_dir(dir: &Path) -> Option<PathBuf> {
         .collect();
     sort_image_files(&mut files);
     files.into_iter().next()
+}
+
+/// アニメ1フレーム（表示可能サイズ＋表示時間）。
+struct AnimFrame {
+    rgba: image::RgbaImage,
+    delay_ms: u32,
+}
+
+/// 経過時間から表示フレーム番号を求める。delaysが空・合計0なら0。
+pub fn anim_index_at(delays_ms: &[u32], elapsed_ms: u64) -> usize {
+    let total: u64 = delays_ms.iter().map(|d| *d as u64).sum();
+    if total == 0 || delays_ms.is_empty() {
+        return 0;
+    }
+    let mut t = elapsed_ms % total;
+    for (i, d) in delays_ms.iter().enumerate() {
+        if t < *d as u64 {
+            return i;
+        }
+        t -= *d as u64;
+    }
+    0
+}
+
+/// 回転を適用する（時計回り90度×n）。
+fn rotate_rgba(base: &image::RgbaImage, rotation: u8) -> image::RgbaImage {
+    match rotation % 4 {
+        0 => base.clone(),
+        1 => image::imageops::rotate90(base),
+        2 => image::imageops::rotate180(base),
+        3 => image::imageops::rotate270(base),
+        _ => base.clone(),
+    }
+}
+
+/// GIFアニメを全フレームデコードする。アニメでなければ空を返す。
+/// フレーム上限200、遅延は20ms〜60sに丸める。
+fn decode_frames(path: &Path, max_side: usize) -> (Vec<AnimFrame>, Option<(u32, u32)>) {
+    const MAX_FRAMES: usize = 200;
+    let is_gif = image::ImageReader::open(path)
+        .ok()
+        .and_then(|r| r.with_guessed_format().ok())
+        .and_then(|r| r.format())
+        == Some(image::ImageFormat::Gif);
+    if !is_gif {
+        return (Vec::new(), None);
+    }
+    let Ok(file) = std::fs::File::open(path) else {
+        return (Vec::new(), None);
+    };
+    let Ok(decoder) = image::codecs::gif::GifDecoder::new(std::io::BufReader::new(file)) else {
+        return (Vec::new(), None);
+    };
+    let mut frames = Vec::new();
+    let mut orig = None;
+    for frame in decoder.into_frames().take(MAX_FRAMES + 1) {
+        let Ok(frame) = frame else { break };
+        let (n, d) = frame.delay().numer_denom_ms();
+        let buf = frame.into_buffer();
+        if orig.is_none() {
+            orig = Some((buf.width(), buf.height()));
+        }
+        if frames.len() >= MAX_FRAMES {
+            break;
+        }
+        let ms = if d == 0 {
+            100
+        } else {
+            ((n as f64 / d as f64).round() as u32).clamp(20, 60000)
+        };
+        frames.push(AnimFrame {
+            rgba: downscale_to_cap(buf, max_side),
+            delay_ms: ms,
+        });
+    }
+    (frames, orig)
 }
 
 /// テクスチャ上限に収まるよう高速に縮小する。収まっていればそのまま返す。
@@ -381,6 +458,9 @@ pub struct ViewerApp {
     tex_cap: usize,
     base_cap: usize,
     orig_dims: Option<(u32, u32)>,
+    anim_frames: Vec<AnimFrame>,
+    anim_textures: Vec<egui::TextureHandle>,
+    anim_start: Option<Instant>,
     show_assoc: bool,
     assoc_status: Vec<(String, bool)>,
 }
@@ -419,6 +499,9 @@ impl ViewerApp {
             tex_cap: 2048,
             base_cap: 2048,
             orig_dims: None,
+            anim_frames: Vec::new(),
+            anim_textures: Vec::new(),
+            anim_start: None,
             show_assoc: false,
             assoc_status: Vec::new(),
         };
@@ -439,15 +522,9 @@ impl ViewerApp {
     }
 
     fn oriented_image(&self) -> Option<image::RgbaImage> {
-        let base = self.base.as_ref()?;
-        let img = match self.rotation % 4 {
-            0 => base.clone(),
-            1 => image::imageops::rotate90(base),
-            2 => image::imageops::rotate180(base),
-            3 => image::imageops::rotate270(base),
-            _ => base.clone(),
-        };
-        Some(img)
+        self.base
+            .as_ref()
+            .map(|base| rotate_rgba(base, self.rotation))
     }
 
     fn rebuild_texture(&mut self, ctx: &egui::Context) {
@@ -456,19 +533,36 @@ impl ViewerApp {
         if self.base.is_some() && self.base_cap != self.tex_cap {
             self.load_current(None);
         }
+        let name = self
+            .current_path()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "image".to_owned());
         if let Some(rgba) = self.oriented_image() {
             // 通常は先読み/読込時に縮小済み。念のため上限ガード。
             let rgba = downscale_to_cap(rgba, self.tex_cap);
             let (w, h) = (rgba.width() as usize, rgba.height() as usize);
             let pixels = rgba.into_raw();
             let color = egui::ColorImage::from_rgba_unmultiplied([w, h], &pixels);
-            let name = self
-                .current_path()
-                .map(|p| p.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "image".to_owned());
-            self.texture = Some(ctx.load_texture(name, color, egui::TextureOptions::LINEAR));
+            self.texture =
+                Some(ctx.load_texture(name.clone(), color, egui::TextureOptions::LINEAR));
         } else {
             self.texture = None;
+        }
+        // アニメは全フレームのテクスチャを作る（回転適用済み）
+        self.anim_textures.clear();
+        for i in 0..self.anim_frames.len() {
+            let rgba = downscale_to_cap(
+                rotate_rgba(&self.anim_frames[i].rgba, self.rotation),
+                self.tex_cap,
+            );
+            let (w, h) = (rgba.width() as usize, rgba.height() as usize);
+            let pixels = rgba.into_raw();
+            let color = egui::ColorImage::from_rgba_unmultiplied([w, h], &pixels);
+            self.anim_textures.push(ctx.load_texture(
+                format!("{name}#{i}"),
+                color,
+                egui::TextureOptions::LINEAR,
+            ));
         }
     }
 
@@ -488,11 +582,20 @@ impl ViewerApp {
         self.texture = None;
         self.base = None;
         self.orig_dims = None;
+        self.anim_frames.clear();
+        self.anim_textures.clear();
+        self.anim_start = None;
         let Some(path) = self.current_path().map(|p| p.to_path_buf()) else {
             return;
         };
-        // 先読みキャッシュ優先（移動時のもたつきを消す）
-        if let Some(cached) = self.loader.take(&path, self.tex_cap) {
+        // GIFアニメは全フレームデコードして再生対象にする（2枚以上）
+        let (frames, orig) = decode_frames(&path, self.tex_cap);
+        if frames.len() > 1 {
+            self.anim_frames = frames;
+            self.orig_dims = orig;
+            self.anim_start = Some(Instant::now());
+            self.status_msg.clear();
+        } else if let Some(cached) = self.loader.take(&path, self.tex_cap) {
             self.base = Some(cached.rgba);
             self.orig_dims = Some(cached.orig);
             self.status_msg.clear();
@@ -585,7 +688,7 @@ impl ViewerApp {
     }
 
     pub fn rotate_cw(&mut self, ctx: &egui::Context) {
-        if self.base.is_none() {
+        if self.base.is_none() && self.anim_frames.is_empty() {
             return;
         }
         self.rotation = (self.rotation + 1) % 4;
@@ -594,7 +697,7 @@ impl ViewerApp {
     }
 
     pub fn rotate_ccw(&mut self, ctx: &egui::Context) {
-        if self.base.is_none() {
+        if self.base.is_none() && self.anim_frames.is_empty() {
             return;
         }
         self.rotation = (self.rotation + 3) % 4;
@@ -762,10 +865,29 @@ impl ViewerApp {
         self.load_error.as_deref()
     }
     pub fn has_texture(&self) -> bool {
-        self.texture.is_some()
+        self.texture.is_some() || !self.anim_textures.is_empty()
     }
     pub fn texture_size(&self) -> Option<[usize; 2]> {
-        self.texture.as_ref().map(|t| t.size())
+        if self.is_animated() {
+            let idx = self.anim_index();
+            self.anim_textures.get(idx).map(|t| t.size())
+        } else {
+            self.texture.as_ref().map(|t| t.size())
+        }
+    }
+    pub fn is_animated(&self) -> bool {
+        !self.anim_frames.is_empty()
+    }
+    pub fn frame_count(&self) -> usize {
+        self.anim_frames.len()
+    }
+    /// 現在表示すべきフレーム番号（再生時刻基準）。
+    pub fn anim_index(&self) -> usize {
+        let Some(start) = self.anim_start else {
+            return 0;
+        };
+        let delays: Vec<u32> = self.anim_frames.iter().map(|f| f.delay_ms).collect();
+        anim_index_at(&delays, start.elapsed().as_millis() as u64)
     }
     pub fn image_dims(&self) -> Option<(u32, u32)> {
         self.orig_dims
@@ -1146,6 +1268,10 @@ impl eframe::App for ViewerApp {
                         ui.separator();
                         ui.label("再生中");
                     }
+                    if self.is_animated() {
+                        ui.separator();
+                        ui.label(format!("アニメ {}/{}", self.anim_index() + 1, self.frame_count()));
+                    }
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label("ホイール:前後 / 中ボタン押下中のみ等倍 / マウス:視点移動 / R:回転 / F:全画面 / Space:再生");
@@ -1161,7 +1287,12 @@ impl eframe::App for ViewerApp {
                 });
                 return;
             }
-            let Some(handle) = self.texture.clone() else {
+            let Some(handle) = (if self.is_animated() {
+                let idx = self.anim_index();
+                self.anim_textures.get(idx).cloned()
+            } else {
+                self.texture.clone()
+            }) else {
                 ui.centered_and_justified(|ui| {
                     ui.vertical_centered(|ui| {
                         ui.add_space(40.0);
@@ -1201,7 +1332,7 @@ impl eframe::App for ViewerApp {
 
             // 描画サイズ
             let scale = self.current_scale(avail, iw, ih);
-            if !self.fit && scale >= 1.0 && self.detail_tiles.is_empty() {
+            if !self.fit && scale >= 1.0 && self.detail_tiles.is_empty() && !self.is_animated() {
                 let base = self.base.as_ref().unwrap();
                 let (ow, oh) = self.orig_dims.unwrap();
                 if ow > base.width() || oh > base.height() {
@@ -1240,6 +1371,10 @@ impl eframe::App for ViewerApp {
                 }
             } else {
                 ui.put(img_rect, egui::Image::new(&handle).fit_to_exact_size(disp));
+            }
+            // アニメ再生中は再描画を続ける
+            if self.is_animated() {
+                ctx.request_repaint();
             }
         });
 
@@ -1428,6 +1563,21 @@ mod tests {
         // 画像が領域より小さい軸は中央固定
         let p = ViewerApp::pan_for_hover(avail, egui::vec2(400.0, 300.0), 0.0, 1.0);
         assert!(approx(p.x, 0.0) && approx(p.y, 0.0), "got {p:?}");
+    }
+
+    #[test]
+    fn anim_index_timing() {
+        let d = [50, 100, 150];
+        assert_eq!(anim_index_at(&d, 0), 0);
+        assert_eq!(anim_index_at(&d, 49), 0);
+        assert_eq!(anim_index_at(&d, 50), 1);
+        assert_eq!(anim_index_at(&d, 149), 1);
+        assert_eq!(anim_index_at(&d, 150), 2);
+        assert_eq!(anim_index_at(&d, 299), 2);
+        assert_eq!(anim_index_at(&d, 300), 0);
+        assert_eq!(anim_index_at(&d, 450), 2);
+        assert_eq!(anim_index_at(&[], 100), 0);
+        assert_eq!(anim_index_at(&[0, 0], 100), 0);
     }
 
     #[test]
