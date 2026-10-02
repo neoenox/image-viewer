@@ -1,0 +1,21 @@
+[package]
+name = "image-viewer"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+eframe = { version = "0.32", features = ["default_fonts"] }
+egui = "0.32"
+image = "0.25"
+rfd = "0.15"
+fast_image_resize = { version = "6", features = ["image"] }
+winreg = "0.52"
+
+[profile.release]
+opt-level = 2
+strip = true
+lto = false
+panic = "unwind"
+
+[dev-dependencies]
+ttf-parser = "0.25"
