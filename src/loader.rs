@@ -3,7 +3,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
 
-pub(crate) const CACHE_BUDGET: usize = 64 * 1024 * 1024;
+// Holds the five-image keep window (current ±2) at the 2048px cap (16MB each).
+pub(crate) const CACHE_BUDGET: usize = 80 * 1024 * 1024;
 #[derive(Clone)]
 pub struct CachedImage {
     pub rgba: Arc<image::RgbaImage>,
@@ -285,7 +286,7 @@ mod tests {
             state.insert((PathBuf::from(format!("{index}.png")), 2048), make());
         }
         assert_eq!(state.bytes, CACHE_BUDGET);
-        assert_eq!(state.cache.len(), 4);
+        assert_eq!(state.cache.len(), 5);
         assert!(!state.cache.contains_key(&(PathBuf::from("0.png"), 2048)));
         let image = state.cache.get(&(PathBuf::from("5.png"), 2048)).unwrap();
         assert!(Arc::ptr_eq(&image.rgba, &image.clone().rgba));

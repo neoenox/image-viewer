@@ -404,6 +404,7 @@ impl ViewerApp {
         self.rotation = (self.rotation + 1) % 4;
         self.detail_tiles.clear();
         self.detail_key = None;
+        self.detail_pending = false;
         self.rebuild_texture(ctx);
     }
 
@@ -414,6 +415,7 @@ impl ViewerApp {
         self.rotation = (self.rotation + 3) % 4;
         self.detail_tiles.clear();
         self.detail_key = None;
+        self.detail_pending = false;
         self.rebuild_texture(ctx);
     }
 
