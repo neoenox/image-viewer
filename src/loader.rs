@@ -1,7 +1,11 @@
 use crate::imaging::{decode_image, downscale_to_cap, rotate_rgba};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
+
+/// Failed loads are retried after this long (e.g. a file still being written).
+const FAILED_RETRY: Duration = Duration::from_secs(5);
 
 // Holds the five-image keep window (current ±2) at the 2048px cap (16MB each).
 pub(crate) const CACHE_BUDGET: usize = 80 * 1024 * 1024;
@@ -34,7 +38,7 @@ struct State {
     detail: Option<(PathBuf, DetailKey)>,
     preloads: VecDeque<Key>,
     active: Option<Key>,
-    failed: HashSet<Key>,
+    failed: HashMap<Key, Instant>,
     keep_cap: Option<usize>,
     cache: HashMap<Key, CachedImage>,
     order: VecDeque<Key>,
@@ -45,6 +49,19 @@ struct State {
     stopping: bool,
 }
 impl State {
+    /// Mark a cached key as most recently used.
+    fn touch(&mut self, key: &Key) {
+        if let Some(pos) = self.order.iter().position(|k| k == key) {
+            if let Some(k) = self.order.remove(pos) {
+                self.order.push_back(k);
+            }
+        }
+    }
+    fn is_failed(&self, key: &Key) -> bool {
+        self.failed
+            .get(key)
+            .is_some_and(|at| at.elapsed() < FAILED_RETRY)
+    }
     fn insert(&mut self, key: Key, value: CachedImage) {
         let bytes = value.rgba.as_raw().len();
         if bytes > CACHE_BUDGET {
@@ -78,9 +95,22 @@ impl Default for ImageLoader {
 impl ImageLoader {
     pub fn new() -> Self {
         let shared = Arc::new((Mutex::new(State::default()), Condvar::new()));
+        // Detail decoding is slow; keep it off the thread that serves navigation.
+        Self::spawn_worker(&shared, false);
+        Self::spawn_worker(&shared, true);
+        Self { shared }
+    }
+    fn spawn_worker(shared: &Arc<(Mutex<State>, Condvar)>, detail_only: bool) {
         let worker = shared.clone();
         std::thread::Builder::new()
-            .name("image-loader".into())
+            .name(
+                if detail_only {
+                    "image-detail"
+                } else {
+                    "image-loader"
+                }
+                .into(),
+            )
             .spawn(move || loop {
                 let (lock, wake) = &*worker;
                 let job = {
@@ -89,23 +119,30 @@ impl ImageLoader {
                         if state.stopping {
                             return;
                         }
-                        if let Some((gen, key)) = state.current.take() {
-                            state.active = Some(key.clone());
-                            break Job::Current(gen, key);
-                        }
-                        if let Some((path, key)) = state.detail.take() {
-                            break Job::Detail(path, key);
-                        }
-                        if let Some(key) = state.preloads.pop_front() {
-                            state.active = Some(key.clone());
-                            break Job::Preload(key);
+                        if detail_only {
+                            if let Some((path, key)) = state.detail.take() {
+                                break Job::Detail(path, key);
+                            }
+                        } else {
+                            if let Some((gen, key)) = state.current.take() {
+                                state.active = Some(key.clone());
+                                break Job::Current(gen, key);
+                            }
+                            if let Some(key) = state.preloads.pop_front() {
+                                state.active = Some(key.clone());
+                                break Job::Preload(key);
+                            }
                         }
                         state = wake.wait(state).unwrap();
                     }
                 };
                 match job {
                     Job::Current(gen, key) => {
-                        let cached = lock.lock().unwrap().cache.get(&key).cloned();
+                        let cached = {
+                            let mut state = lock.lock().unwrap();
+                            state.touch(&key);
+                            state.cache.get(&key).cloned()
+                        };
                         let result = cached.map(Ok).unwrap_or_else(|| load(&key));
                         let mut state = lock.lock().unwrap();
                         state.active = None;
@@ -128,7 +165,7 @@ impl ImageLoader {
                             match result {
                                 Some(Ok(image)) => state.insert(key, image),
                                 Some(Err(_)) => {
-                                    state.failed.insert(key);
+                                    state.failed.insert(key, Instant::now());
                                 }
                                 None => {}
                             }
@@ -151,7 +188,6 @@ impl ImageLoader {
                 }
             })
             .expect("image loader");
-        Self { shared }
     }
     pub(crate) fn select(&self, generation: u64, path: PathBuf, cap: usize) {
         let (lock, wake) = &*self.shared;
@@ -161,7 +197,7 @@ impl ImageLoader {
         state.detail = None;
         state.result = None;
         state.detail_result = None;
-        wake.notify_one();
+        wake.notify_all();
     }
     pub(crate) fn poll(&self) -> Option<(u64, Result<CachedImage, String>)> {
         self.shared.0.lock().unwrap().result.take()
@@ -169,19 +205,16 @@ impl ImageLoader {
     pub(crate) fn detail(&self, path: PathBuf, key: DetailKey) {
         let mut state = self.shared.0.lock().unwrap();
         state.detail = Some((path, key));
-        self.shared.1.notify_one();
+        self.shared.1.notify_all();
     }
     pub(crate) fn poll_detail(&self) -> Option<Result<DetailImage, (DetailKey, String)>> {
         self.shared.0.lock().unwrap().detail_result.take()
     }
     pub fn take(&self, path: &Path, cap: usize) -> Option<CachedImage> {
-        self.shared
-            .0
-            .lock()
-            .unwrap()
-            .cache
-            .get(&(path.to_owned(), cap))
-            .cloned()
+        let key = (path.to_owned(), cap);
+        let mut state = self.shared.0.lock().unwrap();
+        state.touch(&key);
+        state.cache.get(&key).cloned()
     }
     pub fn is_cached(&self, path: &Path, cap: usize) -> bool {
         self.shared
@@ -195,7 +228,7 @@ impl ImageLoader {
         let key = (path, cap);
         let mut state = self.shared.0.lock().unwrap();
         if state.cache.contains_key(&key)
-            || state.failed.contains(&key)
+            || state.is_failed(&key)
             || state.preloads.contains(&key)
             || state.active.as_ref() == Some(&key)
         {
@@ -207,21 +240,22 @@ impl ImageLoader {
         if state.preloads.len() < 16 {
             state.preloads.push_back(key);
         }
-        self.shared.1.notify_one();
+        self.shared.1.notify_all();
     }
     pub(crate) fn is_failed(&self, path: &Path, cap: usize) -> bool {
         self.shared
             .0
             .lock()
             .unwrap()
-            .failed
-            .contains(&(path.to_owned(), cap))
+            .is_failed(&(path.to_owned(), cap))
     }
     pub fn prune(&self, keep: &[PathBuf], cap: usize) {
         let mut state = self.shared.0.lock().unwrap();
         state.keep = keep.to_vec();
         state.keep_cap = Some(cap);
-        state.failed.retain(|(p, c)| keep.contains(p) && *c == cap);
+        state
+            .failed
+            .retain(|(p, c), _| keep.contains(p) && *c == cap);
         state
             .preloads
             .retain(|(p, c)| keep.contains(p) && *c == cap);
@@ -236,7 +270,7 @@ impl ImageLoader {
 impl Drop for ImageLoader {
     fn drop(&mut self) {
         self.shared.0.lock().unwrap().stopping = true;
-        self.shared.1.notify_one();
+        self.shared.1.notify_all();
     }
 }
 fn load((path, cap): &Key) -> Result<CachedImage, String> {
@@ -290,6 +324,35 @@ mod tests {
         assert!(!state.cache.contains_key(&(PathBuf::from("0.png"), 2048)));
         let image = state.cache.get(&(PathBuf::from("5.png"), 2048)).unwrap();
         assert!(Arc::ptr_eq(&image.rgba, &image.clone().rgba));
+    }
+    #[test]
+    fn touched_entries_survive_eviction() {
+        let mut state = State::default();
+        let make = || CachedImage {
+            rgba: Arc::new(image::RgbaImage::new(2048, 2048)),
+            orig: (2048, 2048),
+            gif: false,
+        };
+        let key = |i: usize| (PathBuf::from(format!("{i}.png")), 2048);
+        for index in 0..5 {
+            state.insert(key(index), make());
+        }
+        state.touch(&key(0));
+        state.insert(key(5), make());
+        assert!(state.cache.contains_key(&key(0)));
+        assert!(!state.cache.contains_key(&key(1)));
+    }
+    #[test]
+    fn failed_entries_expire() {
+        let mut state = State::default();
+        let key = (PathBuf::from("bad.png"), 2048);
+        state.failed.insert(key.clone(), Instant::now());
+        assert!(state.is_failed(&key));
+        state.failed.insert(
+            key.clone(),
+            Instant::now() - FAILED_RETRY - Duration::from_secs(1),
+        );
+        assert!(!state.is_failed(&key));
     }
     #[test]
     fn current_selection_supersedes_pending_work_and_errors_recover() {
