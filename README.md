@@ -50,8 +50,10 @@ are never truncated at 200 frames. As in the previous viewer, GIFs loop continuo
 Decoding rejects images whose estimated expansion exceeds the 256 MiB per-job
 limit. This is not a process-wide memory ceiling: decoder working memory, display
 textures, GIF decoding, and thumbnail decoding also use memory. Region decoding
-still temporarily expands the source image because the generic decoder does not
-support reading only a rectangle. An in-flight decode finishes before cancellation
+expands the whole source image because the generic decoder does not support reading
+only a rectangle; the expanded image (at most 128 MiB) is kept while you pan across
+the same image and rotation, and dropped when you move to another file, rotate, or
+the file changes on disk. An in-flight decode finishes before cancellation
 is observed; pending current-image work takes precedence over preloads.
 
 ## Latency benchmark

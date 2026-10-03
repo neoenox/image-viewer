@@ -46,7 +46,16 @@ struct State {
     result: Option<(u64, Result<CachedImage, String>)>,
     detail_result: Option<Result<DetailImage, (DetailKey, String)>>,
     keep: Vec<PathBuf>,
+    detail_src: Option<DetailSource>,
     stopping: bool,
+}
+/// The decoded (already rotated) source of the last detail request, kept so panning
+/// across one image does not decode the whole file again for every region.
+struct DetailSource {
+    path: PathBuf,
+    rotation: u8,
+    modified: Option<std::time::SystemTime>,
+    image: Arc<image::RgbaImage>,
 }
 impl State {
     /// Mark a cached key as most recently used.
@@ -172,7 +181,8 @@ impl ImageLoader {
                         }
                     }
                     Job::Detail(path, key) => {
-                        let result = load_detail(&path, &key);
+                        let result = detail_source(lock, &path, &key)
+                            .and_then(|source| crop_detail(&source, &key));
                         let mut state = lock.lock().unwrap();
                         if state.generation == key.generation && !state.stopping {
                             state.detail_result = Some(
@@ -193,6 +203,9 @@ impl ImageLoader {
         let (lock, wake) = &*self.shared;
         let mut state = lock.lock().unwrap();
         state.generation = generation;
+        if state.detail_src.as_ref().is_some_and(|s| s.path != path) {
+            state.detail_src = None;
+        }
         state.current = Some((generation, (path, cap)));
         state.detail = None;
         state.result = None;
@@ -286,13 +299,47 @@ fn load((path, cap): &Key) -> Result<CachedImage, String> {
     let rgba = Arc::new(downscale_to_cap(image.into_rgba8(), (*cap).min(2048)));
     Ok(CachedImage { rgba, orig, gif })
 }
-fn load_detail(path: &Path, key: &DetailKey) -> Result<image::RgbaImage, String> {
+fn modified_time(path: &Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(path).and_then(|m| m.modified()).ok()
+}
+/// Decoded, rotated source for a detail request: reused while the file, its
+/// modification time and the rotation are unchanged, otherwise decoded and stored.
+fn detail_source(
+    lock: &Mutex<State>,
+    path: &Path,
+    key: &DetailKey,
+) -> Result<Arc<image::RgbaImage>, String> {
+    let modified = modified_time(path);
+    if let Some(source) = &lock.lock().unwrap().detail_src {
+        if source.path == path && source.rotation == key.rotation && source.modified == modified {
+            return Ok(source.image.clone());
+        }
+    }
+    let image = Arc::new(decode_detail_source(path, key.rotation)?);
+    let mut state = lock.lock().unwrap();
+    if state.generation == key.generation && !state.stopping {
+        state.detail_src = Some(DetailSource {
+            path: path.to_owned(),
+            rotation: key.rotation,
+            modified,
+            image: image.clone(),
+        });
+    }
+    Ok(image)
+}
+fn decode_detail_source(path: &Path, rotation: u8) -> Result<image::RgbaImage, String> {
     let image = decode_image(path).map_err(|e| e.to_string())?.into_rgba8();
-    let image = if key.rotation == 0 {
+    Ok(if rotation == 0 {
         image
     } else {
-        rotate_rgba(&image, key.rotation)
-    };
+        rotate_rgba(&image, rotation)
+    })
+}
+#[cfg(test)]
+fn load_detail(path: &Path, key: &DetailKey) -> Result<image::RgbaImage, String> {
+    crop_detail(&decode_detail_source(path, key.rotation)?, key)
+}
+fn crop_detail(image: &image::RgbaImage, key: &DetailKey) -> Result<image::RgbaImage, String> {
     let [x, y, w, h] = key.region;
     if x >= image.width() || y >= image.height() || w == 0 || h == 0 {
         return Err("画像サイズが変わりました。画像を開き直してください".into());
@@ -302,7 +349,7 @@ fn load_detail(path: &Path, key: &DetailKey) -> Result<image::RgbaImage, String>
     if u64::from(w) * u64::from(h) * 4 > CACHE_BUDGET as u64 {
         return Err("原寸表示領域がメモリ上限を超えています".into());
     }
-    Ok(image::imageops::crop_imm(&image, x, y, w, h).to_image())
+    Ok(image::imageops::crop_imm(image, x, y, w, h).to_image())
 }
 
 #[cfg(test)]
@@ -412,6 +459,78 @@ mod detail_tests {
         assert!(load_detail(&path, &key).is_err());
         std::fs::remove_file(path).unwrap();
     }
+
+    fn key(generation: u64, rotation: u8, region: [u32; 4]) -> DetailKey {
+        DetailKey {
+            generation,
+            rotation,
+            region,
+        }
+    }
+    fn detail_and_wait(loader: &ImageLoader, path: &Path, key: DetailKey) -> DetailImage {
+        loader.detail(path.to_owned(), key);
+        let start = std::time::Instant::now();
+        loop {
+            if let Some(result) = loader.poll_detail() {
+                return result.map_err(|(_, e)| e).unwrap();
+            }
+            assert!(start.elapsed() < std::time::Duration::from_secs(10));
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+    fn source(loader: &ImageLoader) -> Option<(Arc<image::RgbaImage>, u8)> {
+        let state = loader.shared.0.lock().unwrap();
+        state
+            .detail_src
+            .as_ref()
+            .map(|s| (s.image.clone(), s.rotation))
+    }
+
+    #[test]
+    fn detail_source_is_reused_until_rotation_file_or_selection_changes() {
+        let dir = std::env::temp_dir().join(format!("viewer-detail-reuse-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (a, b) = (dir.join("a.png"), dir.join("b.png"));
+        image::RgbaImage::from_pixel(300, 200, image::Rgba([1, 2, 3, 255]))
+            .save(&a)
+            .unwrap();
+        image::RgbaImage::from_pixel(100, 100, image::Rgba([9, 9, 9, 255]))
+            .save(&b)
+            .unwrap();
+        let loader = ImageLoader::new();
+        loader.select(1, a.clone(), 2048);
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let _ = loader.poll();
+
+        // Two different regions of the same image share one decoded source.
+        let first = detail_and_wait(&loader, &a, key(1, 0, [0, 0, 64, 64]));
+        let (src1, _) = source(&loader).unwrap();
+        let second = detail_and_wait(&loader, &a, key(1, 0, [128, 64, 64, 64]));
+        let (src2, _) = source(&loader).unwrap();
+        assert!(Arc::ptr_eq(&src1, &src2), "source decoded twice");
+        assert_eq!((first.rgba.width(), second.rgba.width()), (64, 64));
+
+        // A rotation change needs a re-oriented source.
+        let rotated = detail_and_wait(&loader, &a, key(1, 1, [0, 0, 64, 64]));
+        let (src3, rotation) = source(&loader).unwrap();
+        assert!(!Arc::ptr_eq(&src2, &src3));
+        assert_eq!(rotation, 1);
+        assert_eq!(src3.dimensions(), (200, 300));
+        assert_eq!(rotated.rgba.dimensions(), (64, 64));
+
+        // A rewritten file (new modification time) is decoded again.
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        image::RgbaImage::from_pixel(320, 220, image::Rgba([4, 5, 6, 255]))
+            .save(&a)
+            .unwrap();
+        detail_and_wait(&loader, &a, key(1, 1, [0, 0, 64, 64]));
+        assert_eq!(source(&loader).unwrap().0.dimensions(), (220, 320));
+
+        // Selecting another file drops the retained source.
+        loader.select(2, b, 2048);
+        assert!(source(&loader).is_none());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }
 
 /// Latency benchmarks, run on demand:
@@ -505,6 +624,34 @@ mod bench {
             busy.push(wait_result(&loader, 2));
         }
 
+        // 4. Panning: first region decodes the file, later regions reuse the source.
+        let (mut first, mut later) = (Vec::new(), Vec::new());
+        for _ in 0..5 {
+            let loader = ImageLoader::new();
+            loader.select(1, big.clone(), 2048);
+            wait_result(&loader, 1);
+            for step in 0..4u32 {
+                let start = Instant::now();
+                loader.detail(
+                    big.clone(),
+                    DetailKey {
+                        generation: 1,
+                        rotation: 0,
+                        region: [step * 512, 0, 512, 512],
+                    },
+                );
+                while loader.poll_detail().is_none() {
+                    std::thread::sleep(Duration::from_micros(200));
+                }
+                let ms = start.elapsed().as_secs_f64() * 1000.0;
+                if step == 0 {
+                    first.push(ms);
+                } else {
+                    later.push(ms);
+                }
+            }
+        }
+
         let fmt = |v: &[f64]| {
             v.iter()
                 .map(|x| format!("{x:.0}"))
@@ -525,6 +672,16 @@ mod bench {
             "BENCH during detail decode     median {:.0} ms  [{}]",
             median(busy.clone()),
             fmt(&busy)
+        );
+        println!(
+            "BENCH pan, first region        median {:.0} ms  [{}]",
+            median(first.clone()),
+            fmt(&first)
+        );
+        println!(
+            "BENCH pan, later regions       median {:.0} ms  [{}]",
+            median(later.clone()),
+            fmt(&later)
         );
         std::fs::remove_dir_all(dir).unwrap();
     }
