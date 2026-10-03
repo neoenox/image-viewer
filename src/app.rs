@@ -961,6 +961,32 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
     #[test]
+    fn rotating_with_pending_detail_clears_pending_flag() {
+        let dir = std::env::temp_dir().join(format!("image-viewer-rot-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("big.png");
+        image::RgbaImage::new(1400, 1200).save(&path).unwrap();
+        let ctx = egui::Context::default();
+        let _ = ctx.run(
+            egui::RawInput {
+                max_texture_side: Some(1024),
+                ..Default::default()
+            },
+            |_| {},
+        );
+        let mut app = ViewerApp::new(None);
+        app.open_path(path, Some(&ctx));
+        settle(&mut app, &ctx);
+        app.request_detail([0, 0, 256, 256]);
+        assert!(app.detail_pending);
+        app.rotate_cw(&ctx);
+        assert!(!app.detail_pending);
+        app.request_detail([0, 0, 256, 256]);
+        app.rotate_ccw(&ctx);
+        assert!(!app.detail_pending);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
     fn gpu_cap_changes_reload_asynchronously() {
         let dir = std::env::temp_dir().join(format!("image-viewer-gpu-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
