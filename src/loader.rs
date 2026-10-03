@@ -413,3 +413,119 @@ mod detail_tests {
         std::fs::remove_file(path).unwrap();
     }
 }
+
+/// Latency benchmarks, run on demand:
+/// `cargo test --release loader::bench -- --ignored --nocapture --test-threads=1`
+#[cfg(test)]
+mod bench {
+    use super::*;
+    use std::time::Instant;
+
+    fn noise_png(path: &Path, w: u32, h: u32, seed: u64) {
+        let mut s = seed | 1;
+        let img = image::RgbaImage::from_fn(w, h, |_, _| {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            image::Rgba([s as u8, (s >> 8) as u8, (s >> 16) as u8, 255])
+        });
+        img.save(path).unwrap();
+    }
+    fn wait_result(loader: &ImageLoader, generation: u64) -> f64 {
+        let start = Instant::now();
+        loop {
+            if let Some((g, result)) = loader.poll() {
+                if g == generation {
+                    assert!(result.is_ok());
+                    return start.elapsed().as_secs_f64() * 1000.0;
+                }
+            }
+            assert!(start.elapsed() < Duration::from_secs(60), "timed out");
+            std::thread::sleep(Duration::from_micros(200));
+        }
+    }
+    fn median(mut v: Vec<f64>) -> f64 {
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        v[v.len() / 2]
+    }
+
+    #[test]
+    #[ignore]
+    fn navigation_latency() {
+        let dir = std::env::temp_dir().join(format!("viewer-bench-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let small: Vec<PathBuf> = (0..6)
+            .map(|i| {
+                let p = dir.join(format!("s{i}.png"));
+                noise_png(&p, 3000, 2000, i + 1);
+                p
+            })
+            .collect();
+        let big = dir.join("big.png");
+        noise_png(&big, 6000, 4000, 99);
+
+        // 1. Cold: select an image that is not cached.
+        let mut cold = Vec::new();
+        for (i, p) in small.iter().enumerate() {
+            let loader = ImageLoader::new();
+            loader.select(1, p.clone(), 2048);
+            cold.push(wait_result(&loader, 1));
+            let _ = i;
+        }
+
+        // 2. Warm: neighbour was preloaded before the user moves to it.
+        let mut warm = Vec::new();
+        for i in 0..5 {
+            let loader = ImageLoader::new();
+            loader.prune(&small, 2048);
+            loader.request(small[i + 1].clone(), 2048);
+            while !loader.is_cached(&small[i + 1], 2048) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            loader.select(1, small[i + 1].clone(), 2048);
+            warm.push(wait_result(&loader, 1));
+        }
+
+        // 3. Contention: a detail decode of a large image is running, then the user navigates.
+        let mut busy = Vec::new();
+        for _ in 0..5 {
+            let loader = ImageLoader::new();
+            loader.select(1, big.clone(), 2048);
+            wait_result(&loader, 1);
+            loader.detail(
+                big.clone(),
+                DetailKey {
+                    generation: 1,
+                    rotation: 0,
+                    region: [0, 0, 512, 512],
+                },
+            );
+            std::thread::sleep(Duration::from_millis(15));
+            loader.select(2, small[0].clone(), 2048);
+            busy.push(wait_result(&loader, 2));
+        }
+
+        let fmt = |v: &[f64]| {
+            v.iter()
+                .map(|x| format!("{x:.0}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        println!(
+            "BENCH cold   (3000x2000 noise) median {:.0} ms  [{}]",
+            median(cold.clone()),
+            fmt(&cold)
+        );
+        println!(
+            "BENCH warm   (preloaded)       median {:.0} ms  [{}]",
+            median(warm.clone()),
+            fmt(&warm)
+        );
+        println!(
+            "BENCH during detail decode     median {:.0} ms  [{}]",
+            median(busy.clone()),
+            fmt(&busy)
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}
