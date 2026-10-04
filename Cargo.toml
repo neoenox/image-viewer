@@ -10,6 +10,7 @@ image = "0.25"
 rfd = "0.15"
 fast_image_resize = { version = "6", features = ["image"] }
 winreg = "0.52"
+raw-window-handle = "0.6"
 
 [profile.release]
 opt-level = 2

@@ -3,7 +3,10 @@ use crate::{assoc, SUPPORTED_EXTS};
 use eframe::egui;
 use std::time::{Duration, Instant};
 impl eframe::App for ViewerApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        if !self.window_icon_set {
+            self.window_icon_set = crate::win_icon::apply(frame);
+        }
         // GPU上限を最新化（先読みの縮小サイズに使う）
         let cap = ctx.input(|i| i.max_texture_side).max(512);
         if cap != self.tex_cap {
