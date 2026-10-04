@@ -155,7 +155,7 @@ impl ViewerApp {
             show_thumbnails: false,
             toolbar_pinned: false,
             thumbnails: std::collections::HashMap::new(),
-            thumbnail_loader: ImageLoader::new(),
+            thumbnail_loader: ImageLoader::for_thumbnails(),
             show_assoc: false,
             assoc_status: Vec::new(),
         };

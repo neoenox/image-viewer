@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
+const THUMBNAIL_WORKERS: usize = 3;
 /// Failed loads are retried after this long (e.g. a file still being written).
 const FAILED_RETRY: Duration = Duration::from_secs(5);
 
@@ -37,7 +38,7 @@ struct State {
     generation: u64,
     detail: Option<(PathBuf, DetailKey)>,
     preloads: VecDeque<Key>,
-    active: Option<Key>,
+    active: Vec<Key>,
     failed: HashMap<Key, Instant>,
     keep_cap: Option<usize>,
     cache: HashMap<Key, CachedImage>,
@@ -103,10 +104,22 @@ impl Default for ImageLoader {
 }
 impl ImageLoader {
     pub fn new() -> Self {
-        let shared = Arc::new((Mutex::new(State::default()), Condvar::new()));
         // Detail decoding is slow; keep it off the thread that serves navigation.
-        Self::spawn_worker(&shared, false);
-        Self::spawn_worker(&shared, true);
+        Self::with_workers(1, true)
+    }
+    /// Thumbnails are small but each needs a full decode, so a visible page is
+    /// decoded in parallel. Peak decode memory grows with the worker count.
+    pub fn for_thumbnails() -> Self {
+        Self::with_workers(THUMBNAIL_WORKERS, false)
+    }
+    fn with_workers(loaders: usize, detail: bool) -> Self {
+        let shared = Arc::new((Mutex::new(State::default()), Condvar::new()));
+        for _ in 0..loaders {
+            Self::spawn_worker(&shared, false);
+        }
+        if detail {
+            Self::spawn_worker(&shared, true);
+        }
         Self { shared }
     }
     fn spawn_worker(shared: &Arc<(Mutex<State>, Condvar)>, detail_only: bool) {
@@ -134,11 +147,11 @@ impl ImageLoader {
                             }
                         } else {
                             if let Some((gen, key)) = state.current.take() {
-                                state.active = Some(key.clone());
+                                state.active.push(key.clone());
                                 break Job::Current(gen, key);
                             }
                             if let Some(key) = state.preloads.pop_front() {
-                                state.active = Some(key.clone());
+                                state.active.push(key.clone());
                                 break Job::Preload(key);
                             }
                         }
@@ -154,7 +167,7 @@ impl ImageLoader {
                         };
                         let result = cached.map(Ok).unwrap_or_else(|| load(&key));
                         let mut state = lock.lock().unwrap();
-                        state.active = None;
+                        state.active.retain(|k| k != &key);
                         if state.generation == gen && !state.stopping {
                             if let Ok(image) = &result {
                                 state.insert(key, image.clone());
@@ -166,7 +179,7 @@ impl ImageLoader {
                         let cached = lock.lock().unwrap().cache.contains_key(&key);
                         let result = if cached { None } else { Some(load(&key)) };
                         let mut state = lock.lock().unwrap();
-                        state.active = None;
+                        state.active.retain(|k| k != &key);
                         if state.keep.contains(&key.0)
                             && state.keep_cap.is_none_or(|cap| cap == key.1)
                             && !state.stopping
@@ -243,7 +256,7 @@ impl ImageLoader {
         if state.cache.contains_key(&key)
             || state.is_failed(&key)
             || state.preloads.contains(&key)
-            || state.active.as_ref() == Some(&key)
+            || state.active.contains(&key)
         {
             return;
         }
@@ -627,7 +640,7 @@ mod bench {
         // 5. Thumbnails: one visible page (6 files) requested at once, 128px cap.
         let mut thumbs = Vec::new();
         for _ in 0..5 {
-            let loader = ImageLoader::new();
+            let loader = ImageLoader::for_thumbnails();
             let start = Instant::now();
             for p in &small {
                 loader.request(p.clone(), 128);
