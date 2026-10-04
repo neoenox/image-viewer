@@ -679,8 +679,13 @@ impl ViewerApp {
 }
 
 /// Title bar / taskbar icon. The exe icon itself is embedded by build.rs.
+/// Uses the PNG decoder directly: `image::load_from_memory` would instantiate every
+/// format decoder again for an in-memory reader and added about 2.8 MB to the exe.
 fn window_icon() -> egui::IconData {
-    let image = image::load_from_memory(include_bytes!("../assets/icon-256.png"))
+    let bytes: &[u8] = include_bytes!("../assets/icon-256.png");
+    let decoder = image::codecs::png::PngDecoder::new(std::io::Cursor::new(bytes))
+        .expect("bundled icon is a valid PNG");
+    let image = image::DynamicImage::from_decoder(decoder)
         .expect("bundled icon is a valid PNG")
         .into_rgba8();
     let (width, height) = image.dimensions();
