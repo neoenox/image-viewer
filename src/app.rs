@@ -101,7 +101,8 @@ pub struct ViewerApp {
     /// Where settings are saved when changed; `None` keeps them in memory only.
     pub settings_path: Option<PathBuf>,
     pub(crate) show_settings: bool,
-    pub(crate) window_icon_set: bool,
+    /// Last title sent to the window, so it is only sent again when it changes.
+    pub(crate) window_title: String,
     pub(crate) show_thumbnails: bool,
     pub(crate) toolbar_pinned: bool,
     pub(crate) thumbnails: std::collections::HashMap<PathBuf, egui::TextureHandle>,
@@ -156,7 +157,7 @@ impl ViewerApp {
             settings: crate::settings::ViewerSettings::default(),
             settings_path: None,
             show_settings: false,
-            window_icon_set: false,
+            window_title: String::new(),
             show_thumbnails: false,
             toolbar_pinned: false,
             thumbnails: std::collections::HashMap::new(),
@@ -695,9 +696,7 @@ pub fn run() -> eframe::Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1100.0, 750.0])
             .with_min_inner_size([640.0, 480.0])
-            .with_drag_and_drop(true)
-            // Empty icon: eframe skips its default "e" icon; win_icon sets ours.
-            .with_icon(egui::IconData::default()),
+            .with_drag_and_drop(true),
         ..Default::default()
     };
     eframe::run_native(

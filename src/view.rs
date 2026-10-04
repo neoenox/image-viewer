@@ -4,9 +4,7 @@ use eframe::egui;
 use std::time::{Duration, Instant};
 impl eframe::App for ViewerApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
-        if !self.window_icon_set {
-            self.window_icon_set = crate::win_icon::apply(frame);
-        }
+        crate::win_icon::apply(frame);
         // GPU上限を最新化（先読みの縮小サイズに使う）
         let cap = ctx.input(|i| i.max_texture_side).max(512);
         if cap != self.tex_cap {
@@ -27,7 +25,12 @@ impl eframe::App for ViewerApp {
             ),
             None => "画像ビューワー".to_owned(),
         };
-        ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
+        // Only on change: every viewport command requests another frame, so sending
+        // it unconditionally kept the UI repainting (one CPU core busy while idle).
+        if self.window_title != title {
+            self.window_title = title.clone();
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
+        }
 
         // ---- ツールバー ----
         let near_top = ctx.input(|i| i.pointer.hover_pos().is_some_and(|p| p.y < 48.0));
