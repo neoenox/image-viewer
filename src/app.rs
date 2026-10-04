@@ -15,6 +15,9 @@ pub(crate) const ICON_STOP: char = '\u{25A0}';
 pub(crate) const ICON_FULL: char = '\u{2922}';
 pub(crate) const ICON_ASSOC: char = '\u{1F517}';
 
+/// 中ボタンを押している間の拡大率（押した時点の表示倍率に対する倍数）。
+pub const PEEK_MAGNIFICATION: f32 = 3.0;
+
 /// ツールバーで使う全アイコン。tofu防止の回帰テスト用。
 pub const TOOLBAR_ICONS: &[char] = &[
     ICON_OPEN, ICON_PREV, ICON_NEXT, ICON_FIT, ICON_ROT_L, ICON_ROT_R, ICON_PLAY, ICON_STOP,
@@ -504,10 +507,17 @@ impl ViewerApp {
         self.zoom_at(factor, cursor, center, old, avail, iw, ih);
     }
 
-    /// 中ボタン押下中の等倍覗き見を開始。すでに等倍以上なら何もしない。
-    /// 戻り値は覗き見に入ったかどうか。
+    /// 中ボタン押下中の拡大（ルーペ）を開始。押した時点の表示倍率の
+    /// [`PEEK_MAGNIFICATION`] 倍にする（等倍に固定しないので、小さい画像や
+    /// 既に等倍以上で見ている画像でも拡大される）。最大倍率に達していれば何もしない。
+    /// 戻り値は拡大に入ったかどうか。
     pub fn begin_peek(&mut self, avail: egui::Vec2, iw: f32, ih: f32) -> bool {
-        if self.peek_saved.is_some() || self.current_scale(avail, iw, ih) >= 1.0 {
+        if self.peek_saved.is_some() {
+            return false;
+        }
+        let scale = self.current_scale(avail, iw, ih);
+        let target = (scale * PEEK_MAGNIFICATION).clamp(0.05, 32.0);
+        if target <= scale {
             return false;
         }
         self.peek_saved = Some(PeekState {
@@ -516,7 +526,7 @@ impl ViewerApp {
             pan: self.pan_offset,
         });
         self.fit = false;
-        self.zoom = 1.0;
+        self.zoom = target;
         true
     }
 

@@ -5,7 +5,9 @@
 //! 「開く→移動→回転→ズーム→エラー系」の一連の操作を検証する。
 //! GUIイベント注入（キー・マウス）は対象外。ネイティブダイアログも開かない。
 
-use image_viewer::{collect_siblings, decode_image, is_supported, setup_jp_font, ViewerApp};
+use image_viewer::{
+    collect_siblings, decode_image, is_supported, setup_jp_font, ViewerApp, PEEK_MAGNIFICATION,
+};
 use std::path::{Path, PathBuf};
 
 /// テストごとに独立したフィクスチャフォルダを作る。tagで並列実行時の衝突を避ける。
@@ -263,7 +265,8 @@ fn momentary_zoom_while_holding() {
 
 #[test]
 fn peek_zoom_while_holding() {
-    // 中ボタン押下中だけ等倍、離したら元の表示に戻る。
+    // 中ボタン押下中だけ、押した時点の表示倍率の PEEK_MAGNIFICATION 倍に拡大し、
+    // 離したら元の表示に戻る。
     let dir = fixture_dir("peek");
     let ctx = headless_ctx();
     let mut app = ViewerApp::new(None);
@@ -272,26 +275,64 @@ fn peek_zoom_while_holding() {
     assert!(app.is_fit());
 
     let avail = egui::vec2(1000.0, 700.0);
-    let [tw, th] = app.texture_size().unwrap();
+    let size = app.display_image_size().unwrap();
+    let fit_scale = app.current_scale(avail, size.x, size.y); // 1/3
 
-    // 押下 → 等倍へ
-    assert!(app.begin_peek(avail, tw as f32, th as f32));
+    // 押下 → フィット倍率の3倍へ（等倍に固定しない）
+    assert!(app.begin_peek(avail, size.x, size.y));
     assert!(!app.is_fit());
-    assert!((app.zoom_level() - 1.0).abs() < 1e-3);
+    let peek = fit_scale * PEEK_MAGNIFICATION;
+    assert!(
+        (app.zoom_level() - peek).abs() < 1e-3,
+        "{}",
+        app.zoom_level()
+    );
     // 押下中の再呼び出しは維持のみ
-    assert!(!app.begin_peek(avail, tw as f32, th as f32));
-    assert!((app.zoom_level() - 1.0).abs() < 1e-3);
+    assert!(!app.begin_peek(avail, size.x, size.y));
+    assert!((app.zoom_level() - peek).abs() < 1e-3);
 
     // 解放 → フィットに復帰
     assert!(app.end_peek());
     assert!(app.is_fit());
     assert!(!app.end_peek());
 
-    // すでに等倍以上（小画像のフィット表示）は覗き見なし
-    app.open_path(dir.join("a.png"), Some(&ctx)); // 100x80 → fit倍率8.0
+    // 既に等倍以上で表示している小さい画像も拡大される（以前は等倍固定で何も起きなかった）
+    app.open_path(dir.join("a.png"), Some(&ctx)); // 100x80 → fit倍率7.0
     settle(&mut app, &ctx);
-    assert!(!app.begin_peek(avail, 100.0, 80.0));
+    let small_fit = app.current_scale(avail, 100.0, 80.0);
+    assert!(small_fit > 1.0);
+    assert!(app.begin_peek(avail, 100.0, 80.0));
+    assert!((app.zoom_level() - small_fit * PEEK_MAGNIFICATION).abs() < 1e-3);
+    assert!(app.end_peek());
     assert!(app.is_fit());
+
+    // 等倍以上の手動ズームからも拡大され、最大倍率(32倍)で頭打ちになる
+    app.zoom_at(
+        2.0,
+        egui::pos2(500.0, 350.0),
+        egui::pos2(500.0, 350.0),
+        small_fit,
+        avail,
+        100.0,
+        80.0,
+    );
+    let manual = app.zoom_level();
+    assert!(app.begin_peek(avail, 100.0, 80.0));
+    assert!((app.zoom_level() - (manual * PEEK_MAGNIFICATION).min(32.0)).abs() < 1e-3);
+    assert!(app.end_peek());
+    assert!((app.zoom_level() - manual).abs() < 1e-3);
+    // 既に最大倍率なら拡大できないので何もしない
+    app.zoom_at(
+        100.0,
+        egui::pos2(500.0, 350.0),
+        egui::pos2(500.0, 350.0),
+        manual,
+        avail,
+        100.0,
+        80.0,
+    );
+    assert!((app.zoom_level() - 32.0).abs() < 1e-3);
+    assert!(!app.begin_peek(avail, 100.0, 80.0));
     cleanup(&dir);
 }
 
@@ -309,7 +350,7 @@ fn peek_follows_cursor_while_holding() {
 
     assert!(app.begin_peek(avail, iw, ih));
     // カーソルを右下へ → 画像右下が見える位置へ
-    let disp = egui::vec2(iw, ih); // zoom=1.0
+    let disp = egui::vec2(iw, ih) * app.zoom_level();
     let pan = ViewerApp::pan_for_hover(avail, disp, 1.0, 1.0);
     assert!(pan.x < 0.0 && pan.y < 0.0, "got {pan:?}");
     // カーソルを左上へ → 画像左上が見える位置へ
@@ -600,12 +641,13 @@ fn original_size_drives_zoom_and_rotation() {
     assert_eq!(app.texture_size(), Some([2048, 1365]));
     assert_eq!(app.display_image_size(), Some(egui::vec2(3000.0, 2000.0)));
     let size = app.display_image_size().unwrap();
+    // Magnification is relative to the original size: fit is 1/3 here, so the
+    // 3x peek shows the 3000x2000 original at about 100%.
     assert!(app.begin_peek(egui::vec2(1000.0, 700.0), size.x, size.y));
-    assert_eq!(
-        app.current_scale(egui::vec2(1000.0, 700.0), size.x, size.y),
-        1.0
-    );
-    assert_eq!(size * app.zoom_level(), egui::vec2(3000.0, 2000.0));
+    let scale = app.current_scale(egui::vec2(1000.0, 700.0), size.x, size.y);
+    assert!((scale - 1.0).abs() < 1e-3, "{scale}");
+    let shown = size * app.zoom_level();
+    assert!((shown.x - 3000.0).abs() < 1.0 && (shown.y - 2000.0).abs() < 1.0);
     app.end_peek();
     app.rotate_cw(&ctx);
     assert_eq!(app.display_image_size(), Some(egui::vec2(2000.0, 3000.0)));
