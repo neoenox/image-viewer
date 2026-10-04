@@ -29,7 +29,9 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path dist -Force
-          Copy-Item target/release/image-viewer.exe "dist/image-viewer-${{ github.ref_name }}-windows-x86_64.exe"
+          # Branch names such as codex/foo contain "/", which is not valid in a file name.
+          $name = "${{ github.ref_name }}" -replace '[\\/:*?"<>|]', '-'
+          Copy-Item target/release/image-viewer.exe "dist/image-viewer-$name-windows-x86_64.exe"
 
       - name: Write checksums
         shell: pwsh
