@@ -98,6 +98,8 @@ pub struct ViewerApp {
     pub(crate) view_rect: egui::Rect,
     pub(crate) detail_key: Option<crate::loader::DetailKey>,
     pub settings: crate::settings::ViewerSettings,
+    /// Where settings are saved when changed; `None` keeps them in memory only.
+    pub settings_path: Option<PathBuf>,
     pub(crate) show_settings: bool,
     pub(crate) show_thumbnails: bool,
     pub(crate) toolbar_pinned: bool,
@@ -151,6 +153,7 @@ impl ViewerApp {
             view_rect: egui::Rect::NOTHING,
             detail_key: None,
             settings: crate::settings::ViewerSettings::default(),
+            settings_path: None,
             show_settings: false,
             show_thumbnails: false,
             toolbar_pinned: false,
@@ -682,6 +685,10 @@ pub fn run() -> eframe::Result<()> {
         .filter(|p| p.is_dir() || is_supported(p) || p.exists());
 
     let mut app = ViewerApp::new(initial);
+    app.settings_path = crate::settings::ViewerSettings::default_path();
+    if let Some(path) = &app.settings_path {
+        app.settings = crate::settings::ViewerSettings::load(path);
+    }
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1100.0, 750.0])
