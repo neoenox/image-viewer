@@ -5,6 +5,15 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 const THUMBNAIL_WORKERS: usize = 3;
+/// Which queue a worker thread serves.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Role {
+    Current,
+    Preload,
+    Detail,
+    /// Current selection first, then preloads (thumbnail workers).
+    Any,
+}
 /// Failed loads are retried after this long (e.g. a file still being written).
 const FAILED_RETRY: Duration = Duration::from_secs(5);
 
@@ -104,32 +113,30 @@ impl Default for ImageLoader {
 }
 impl ImageLoader {
     pub fn new() -> Self {
-        // Detail decoding is slow; keep it off the thread that serves navigation.
-        Self::with_workers(1, true)
+        // Each kind of work has its own thread, so the image being opened never
+        // waits behind a neighbour preload or a slow original-size region decode.
+        Self::with_workers(&[Role::Current, Role::Preload, Role::Detail])
     }
     /// Thumbnails are small but each needs a full decode, so a visible page is
     /// decoded in parallel. Peak decode memory grows with the worker count.
     pub fn for_thumbnails() -> Self {
-        Self::with_workers(THUMBNAIL_WORKERS, false)
+        Self::with_workers(&[Role::Any; THUMBNAIL_WORKERS])
     }
-    fn with_workers(loaders: usize, detail: bool) -> Self {
+    fn with_workers(roles: &[Role]) -> Self {
         let shared = Arc::new((Mutex::new(State::default()), Condvar::new()));
-        for _ in 0..loaders {
-            Self::spawn_worker(&shared, false);
-        }
-        if detail {
-            Self::spawn_worker(&shared, true);
+        for &role in roles {
+            Self::spawn_worker(&shared, role);
         }
         Self { shared }
     }
-    fn spawn_worker(shared: &Arc<(Mutex<State>, Condvar)>, detail_only: bool) {
+    fn spawn_worker(shared: &Arc<(Mutex<State>, Condvar)>, role: Role) {
         let worker = shared.clone();
         std::thread::Builder::new()
             .name(
-                if detail_only {
-                    "image-detail"
-                } else {
-                    "image-loader"
+                match role {
+                    Role::Detail => "image-detail",
+                    Role::Preload => "image-preload",
+                    Role::Current | Role::Any => "image-loader",
                 }
                 .into(),
             )
@@ -141,15 +148,18 @@ impl ImageLoader {
                         if state.stopping {
                             return;
                         }
-                        if detail_only {
+                        if role == Role::Detail {
                             if let Some((path, key)) = state.detail.take() {
                                 break Job::Detail(path, key);
                             }
-                        } else {
+                        }
+                        if matches!(role, Role::Current | Role::Any) {
                             if let Some((gen, key)) = state.current.take() {
                                 state.active.push(key.clone());
                                 break Job::Current(gen, key);
                             }
+                        }
+                        if matches!(role, Role::Preload | Role::Any) {
                             if let Some(key) = state.preloads.pop_front() {
                                 state.active.push(key.clone());
                                 break Job::Preload(key);
@@ -637,6 +647,20 @@ mod bench {
             busy.push(wait_result(&loader, 2));
         }
 
+        // 7. A neighbour preload of a large image is decoding, then the user jumps
+        //    to an image that is not cached.
+        let mut preload_busy = Vec::new();
+        for _ in 0..5 {
+            let loader = ImageLoader::new();
+            let mut keep = small.clone();
+            keep.push(big.clone());
+            loader.prune(&keep, 2048);
+            loader.request(big.clone(), 2048);
+            std::thread::sleep(Duration::from_millis(15));
+            loader.select(1, small[3].clone(), 2048);
+            preload_busy.push(wait_result(&loader, 1));
+        }
+
         // 5. Thumbnails: one visible page (6 files) requested at once, 128px cap.
         let mut thumbs = Vec::new();
         for _ in 0..5 {
@@ -734,6 +758,11 @@ mod bench {
             "BENCH during detail decode     median {:.0} ms  [{}]",
             median(busy.clone()),
             fmt(&busy)
+        );
+        println!(
+            "BENCH during preload decode    median {:.0} ms  [{}]",
+            median(preload_busy.clone()),
+            fmt(&preload_busy)
         );
         println!(
             "BENCH pan, first region        median {:.0} ms  [{}]",
