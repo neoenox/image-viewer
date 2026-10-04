@@ -402,6 +402,7 @@ impl ViewerApp {
             return;
         }
         let mut open = true;
+        let before = self.settings.clone();
         egui::Window::new("操作設定")
             .open(&mut open)
             .resizable(false)
@@ -419,9 +420,20 @@ impl ViewerApp {
                 ui.separator();
                 ui.small("Ctrl+ホイール:拡大縮小 / ドラッグ:視点移動");
                 ui.small("← →:前後 / R:回転 / 0:フィット / F:全画面");
-                ui.small("設定はこの起動中に適用されます。");
+                if self.settings_path.is_some() {
+                    ui.small("設定は自動で保存され、次回の起動時にも使われます。");
+                } else {
+                    ui.small("設定はこの起動中に適用されます。");
+                }
             });
         self.show_settings = open;
+        if self.settings != before {
+            if let Some(path) = &self.settings_path {
+                if let Err(error) = self.settings.save(path) {
+                    self.status_msg = format!("設定を保存できませんでした: {error}");
+                }
+            }
+        }
         if !self.settings.hold_to_peek {
             self.end_peek();
         }

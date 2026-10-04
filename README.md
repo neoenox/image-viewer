@@ -43,7 +43,8 @@ gh workflow run release.yml --ref main
 - T opens the thumbnail list. Click a thumbnail or filename to select it.
 - Arrow keys (or A / D): previous/next; Home / End: first/last; + / - (or E / Q): zoom; 0: fit;
   R / Shift+R: rotate; F / F11: fullscreen; Space: slideshow; Ctrl+O: open; Esc: leave fullscreen or stop the slideshow.
-- Settings apply for the current session.
+- Settings are saved to `%APPDATA%\image-viewer\settings.txt` when changed and loaded at
+  startup. Delete the file to return to the defaults.
 
 The image being opened, neighbour preloads, and original-size region decoding each
 run on their own background worker, so opening an image never waits behind a preload

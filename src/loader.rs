@@ -68,6 +68,16 @@ struct DetailSource {
     image: Arc<image::RgbaImage>,
 }
 impl State {
+    /// How many workers are currently decoding `key`.
+    fn in_flight(&self, key: &Key) -> usize {
+        self.active.iter().filter(|k| *k == key).count()
+    }
+    /// Drop one in-flight marker for `key` (another worker may hold the same key).
+    fn finish(&mut self, key: &Key) {
+        if let Some(pos) = self.active.iter().position(|k| k == key) {
+            self.active.swap_remove(pos);
+        }
+    }
     /// Mark a cached key as most recently used.
     fn touch(&mut self, key: &Key) {
         if let Some(pos) = self.order.iter().position(|k| k == key) {
@@ -172,12 +182,24 @@ impl ImageLoader {
                     Job::Current(gen, key) => {
                         let cached = {
                             let mut state = lock.lock().unwrap();
+                            // The same image may already be decoding as a preload:
+                            // wait for that result instead of decoding it twice.
+                            while state.in_flight(&key) > 1
+                                && state.generation == gen
+                                && !state.stopping
+                            {
+                                state = wake.wait(state).unwrap();
+                            }
+                            if state.generation != gen || state.stopping {
+                                state.finish(&key);
+                                continue;
+                            }
                             state.touch(&key);
                             state.cache.get(&key).cloned()
                         };
                         let result = cached.map(Ok).unwrap_or_else(|| load(&key));
                         let mut state = lock.lock().unwrap();
-                        state.active.retain(|k| k != &key);
+                        state.finish(&key);
                         if state.generation == gen && !state.stopping {
                             if let Ok(image) = &result {
                                 state.insert(key, image.clone());
@@ -189,7 +211,9 @@ impl ImageLoader {
                         let cached = lock.lock().unwrap().cache.contains_key(&key);
                         let result = if cached { None } else { Some(load(&key)) };
                         let mut state = lock.lock().unwrap();
-                        state.active.retain(|k| k != &key);
+                        state.finish(&key);
+                        // A current-image job may be waiting for this result.
+                        wake.notify_all();
                         if state.keep.contains(&key.0)
                             && state.keep_cap.is_none_or(|cap| cap == key.1)
                             && !state.stopping
@@ -309,7 +333,28 @@ impl Drop for ImageLoader {
         self.shared.1.notify_all();
     }
 }
+/// Per-path decode counts, so tests can assert that work was not repeated.
+#[cfg(test)]
+static LOAD_COUNTS: Mutex<Option<HashMap<PathBuf, usize>>> = Mutex::new(None);
+#[cfg(test)]
+fn load_count(path: &Path) -> usize {
+    LOAD_COUNTS
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|m| m.get(path).copied())
+        .unwrap_or(0)
+}
 fn load((path, cap): &Key) -> Result<CachedImage, String> {
+    #[cfg(test)]
+    {
+        *LOAD_COUNTS
+            .lock()
+            .unwrap()
+            .get_or_insert_with(HashMap::new)
+            .entry(path.clone())
+            .or_insert(0) += 1;
+    }
     let mut reader = image::ImageReader::open(path)
         .map_err(|e| e.to_string())?
         .with_guessed_format()
@@ -423,6 +468,50 @@ mod tests {
             Instant::now() - FAILED_RETRY - Duration::from_secs(1),
         );
         assert!(!state.is_failed(&key));
+    }
+    #[test]
+    fn in_flight_markers_are_counted_and_released_one_at_a_time() {
+        let mut state = State::default();
+        let key = (PathBuf::from("same.png"), 2048);
+        state.active.push(key.clone());
+        state.active.push(key.clone());
+        assert_eq!(state.in_flight(&key), 2);
+        state.finish(&key);
+        assert_eq!(state.in_flight(&key), 1);
+        state.finish(&key);
+        assert_eq!(state.in_flight(&key), 0);
+    }
+    #[test]
+    fn selecting_an_image_that_is_being_preloaded_reuses_the_preload() {
+        let dir = std::env::temp_dir().join(format!("viewer-dedupe-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("p.png");
+        image::RgbaImage::from_fn(1500, 1000, |x, y| image::Rgba([x as u8, y as u8, 7, 255]))
+            .save(&path)
+            .unwrap();
+        let loader = ImageLoader::new();
+        loader.prune(std::slice::from_ref(&path), 2048);
+        loader.request(path.clone(), 2048);
+        // Wait until the preload worker has picked the job up.
+        let start = std::time::Instant::now();
+        while loader.shared.0.lock().unwrap().active.is_empty() {
+            assert!(start.elapsed() < std::time::Duration::from_secs(5));
+            std::thread::yield_now();
+        }
+        loader.select(1, path.clone(), 2048);
+        loop {
+            if let Some((generation, result)) = loader.poll() {
+                assert_eq!(generation, 1);
+                assert_eq!(result.unwrap().orig, (1500, 1000));
+                // The current job used the preload's result instead of decoding again.
+                assert_eq!(load_count(&path), 1);
+                break;
+            }
+            assert!(start.elapsed() < std::time::Duration::from_secs(10));
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert!(loader.shared.0.lock().unwrap().active.is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
     }
     #[test]
     fn current_selection_supersedes_pending_work_and_errors_recover() {
