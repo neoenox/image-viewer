@@ -23,6 +23,17 @@ data directory, preserving the user's real file associations:
 powershell -NoProfile -File tests/association-scripts.ps1
 ```
 
+## Releasing
+
+Pushing a `v*` tag runs `.github/workflows/release.yml`, which tests, builds, and
+attaches the exe and `SHA256SUMS.txt` to a GitHub Release. To check the workflow
+without publishing anything, run it manually; the exe is then kept as a workflow
+artifact only:
+
+```powershell
+gh workflow run release.yml --ref main
+```
+
 ## Viewing
 
 - Wheel: previous/next image; Ctrl+wheel: zoom at the pointer.
@@ -34,8 +45,9 @@ powershell -NoProfile -File tests/association-scripts.ps1
   R / Shift+R: rotate; F / F11: fullscreen; Space: slideshow; Ctrl+O: open; Esc: leave fullscreen or stop the slideshow.
 - Settings apply for the current session.
 
-Loading and preloading run on one background worker; original-size region decoding
-runs on its own worker, so a slow region decode does not delay moving to another image.
+The image being opened, neighbour preloads, and original-size region decoding each
+run on their own background worker, so opening an image never waits behind a preload
+or a slow region decode (up to three full-size decodes can be in memory at once).
 Rapid navigation replaces pending selection work and rejects obsolete results.
 The main preview cache is limited to 80 MiB (room for the current image and two
 neighbours on each side at the 2048 pixel cap) and evicts the least recently used
