@@ -624,6 +624,55 @@ mod bench {
             busy.push(wait_result(&loader, 2));
         }
 
+        // 5. Thumbnails: one visible page (6 files) requested at once, 128px cap.
+        let mut thumbs = Vec::new();
+        for _ in 0..5 {
+            let loader = ImageLoader::new();
+            let start = Instant::now();
+            for p in &small {
+                loader.request(p.clone(), 128);
+            }
+            while !small.iter().all(|p| loader.is_cached(p, 128)) {
+                assert!(start.elapsed() < Duration::from_secs(60), "timed out");
+                std::thread::sleep(Duration::from_micros(200));
+            }
+            thumbs.push(start.elapsed().as_secs_f64() * 1000.0);
+        }
+
+        // 6. GIF: time until the first frame of an animation is ready.
+        let gif = dir.join("anim.gif");
+        {
+            let file = std::fs::File::create(&gif).unwrap();
+            let mut encoder = image::codecs::gif::GifEncoder::new_with_speed(file, 30);
+            for i in 0..20u8 {
+                let frame = image::RgbaImage::from_fn(800, 600, |x, y| {
+                    image::Rgba([(x as u8).wrapping_add(i * 12), y as u8, i * 12, 255])
+                });
+                encoder
+                    .encode_frame(image::Frame::from_parts(
+                        frame,
+                        0,
+                        0,
+                        image::Delay::from_numer_denom_ms(100, 1),
+                    ))
+                    .unwrap();
+            }
+        }
+        let mut gif_first = Vec::new();
+        for _ in 0..5 {
+            let start = Instant::now();
+            let animation = crate::animation::Animation::new(gif.clone(), 2048);
+            loop {
+                if let Some(frame) = animation.poll() {
+                    assert!(frame.is_ok());
+                    break;
+                }
+                assert!(start.elapsed() < Duration::from_secs(60), "timed out");
+                std::thread::sleep(Duration::from_micros(200));
+            }
+            gif_first.push(start.elapsed().as_secs_f64() * 1000.0);
+        }
+
         // 4. Panning: first region decodes the file, later regions reuse the source.
         let (mut first, mut later) = (Vec::new(), Vec::new());
         for _ in 0..5 {
@@ -682,6 +731,16 @@ mod bench {
             "BENCH pan, later regions       median {:.0} ms  [{}]",
             median(later.clone()),
             fmt(&later)
+        );
+        println!(
+            "BENCH thumbnails, 6 at 128px   median {:.0} ms  [{}]",
+            median(thumbs.clone()),
+            fmt(&thumbs)
+        );
+        println!(
+            "BENCH GIF first frame (800x600) median {:.0} ms  [{}]",
+            median(gif_first.clone()),
+            fmt(&gif_first)
         );
         std::fs::remove_dir_all(dir).unwrap();
     }
