@@ -261,7 +261,7 @@ impl eframe::App for ViewerApp {
             let hover_in_view = hover.map(|p| view_rect.contains(p)).unwrap_or(false);
             let mid_down = ctx.input(|i| i.pointer.middle_down());
 
-            // 中ボタン押下中だけ等倍覗き見（ルーペ）。離したら元の表示に戻る。
+            // 中ボタン押下中だけ拡大（ルーペ、押した時点の PEEK_MAGNIFICATION 倍）。離したら元の表示に戻る。
             // ホバー連動で覗き見位置がカーソルに追従する。
             if self.settings.hold_to_peek && mid_down && hover_in_view {
                 self.begin_peek(avail, iw, ih);
@@ -299,7 +299,10 @@ impl eframe::App for ViewerApp {
                 egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
                 egui::Color32::WHITE,
             );
-            if !self.fit && scale >= 1.0 && !self.is_animated() {
+            // Load original pixels as soon as the (at most 2048 px) preview would be
+            // stretched on screen, not only from 100% up, so magnified views stay sharp.
+            let preview_stretched = disp.x > handle.size()[0] as f32 + 0.5;
+            if !self.fit && preview_stretched && !self.is_animated() {
                 if let Some(base) = &self.base {
                     let (ow, oh) = self.orig_dims.unwrap();
                     if ow > base.width() || oh > base.height() {
@@ -311,7 +314,12 @@ impl eframe::App for ViewerApp {
                         let y = (lo.y as u32 / 128) * 128;
                         let right = ((hi.x.ceil() as u32).div_ceil(128) * 128).min(iw as u32);
                         let bottom = ((hi.y.ceil() as u32).div_ceil(128) * 128).min(ih as u32);
-                        if right > x && bottom > y {
+                        // At low magnification the visible region can cover most of a
+                        // huge image; keep the preview rather than exceed the budget.
+                        let bytes = u64::from(right.saturating_sub(x))
+                            * u64::from(bottom.saturating_sub(y))
+                            * 4;
+                        if right > x && bottom > y && bytes <= crate::loader::CACHE_BUDGET as u64 {
                             self.request_detail([x, y, right - x, bottom - y]);
                         }
                     }
@@ -419,7 +427,7 @@ impl ViewerApp {
                 );
                 ui.checkbox(
                     &mut self.settings.hold_to_peek,
-                    "中ボタンを押している間だけ等倍表示",
+                    "中ボタンを押している間だけ拡大表示（3倍）",
                 );
                 ui.checkbox(&mut self.settings.hover_pan, "カーソル位置で画像を見渡す");
                 ui.checkbox(&mut self.settings.auto_hide_toolbar, "操作バーを自動で隠す");
