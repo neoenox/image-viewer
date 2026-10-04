@@ -1735,6 +1735,7 @@ dependencies = [
  "egui",
  "fast_image_resize",
  "image",
+ "raw-window-handle",
  "rfd",
  "ttf-parser",
  "winreg",

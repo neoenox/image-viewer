@@ -101,6 +101,8 @@ pub struct ViewerApp {
     /// Where settings are saved when changed; `None` keeps them in memory only.
     pub settings_path: Option<PathBuf>,
     pub(crate) show_settings: bool,
+    /// Last title sent to the window, so it is only sent again when it changes.
+    pub(crate) window_title: String,
     pub(crate) show_thumbnails: bool,
     pub(crate) toolbar_pinned: bool,
     pub(crate) thumbnails: std::collections::HashMap<PathBuf, egui::TextureHandle>,
@@ -155,6 +157,7 @@ impl ViewerApp {
             settings: crate::settings::ViewerSettings::default(),
             settings_path: None,
             show_settings: false,
+            window_title: String::new(),
             show_thumbnails: false,
             toolbar_pinned: false,
             thumbnails: std::collections::HashMap::new(),
@@ -678,19 +681,6 @@ impl ViewerApp {
     }
 }
 
-/// Title bar / taskbar icon. The exe icon itself is embedded by build.rs.
-fn window_icon() -> egui::IconData {
-    let image = image::load_from_memory(include_bytes!("../assets/icon-256.png"))
-        .expect("bundled icon is a valid PNG")
-        .into_rgba8();
-    let (width, height) = image.dimensions();
-    egui::IconData {
-        rgba: image.into_raw(),
-        width,
-        height,
-    }
-}
-
 pub fn run() -> eframe::Result<()> {
     let initial: Option<PathBuf> = std::env::args_os()
         .nth(1)
@@ -706,8 +696,7 @@ pub fn run() -> eframe::Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1100.0, 750.0])
             .with_min_inner_size([640.0, 480.0])
-            .with_drag_and_drop(true)
-            .with_icon(window_icon()),
+            .with_drag_and_drop(true),
         ..Default::default()
     };
     eframe::run_native(
@@ -889,13 +878,6 @@ mod tests {
             let covered = faces.iter().any(|f| f.glyph_index(*cp).is_some());
             assert!(covered, "glyph U+{:04X} missing in all fonts", *cp as u32);
         }
-    }
-
-    #[test]
-    fn bundled_window_icon_decodes() {
-        let icon = window_icon();
-        assert_eq!((icon.width, icon.height), (256, 256));
-        assert_eq!(icon.rgba.len(), 256 * 256 * 4);
     }
 
     #[test]
