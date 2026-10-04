@@ -39,8 +39,9 @@ runs on its own worker, so a slow region decode does not delay moving to another
 Rapid navigation replaces pending selection work and rejects obsolete results.
 The main preview cache is limited to 80 MiB (room for the current image and two
 neighbours on each side at the 2048 pixel cap) and evicts the least recently used
-image first; thumbnails have a separate cache with the same ceiling and only retain
-visible rows. A failed load is retried after 5 seconds, so a file that was still
+image first; thumbnails have a separate cache with the same ceiling, only retain
+visible rows, and are decoded by three workers in parallel (so up to three full-size
+decodes can be in memory at once while the list fills). A failed load is retried after 5 seconds, so a file that was still
 being written does not stay marked as broken. Preview resolution is capped
 at 2048 pixels, with visible original-resolution regions loaded on demand.
 GIF playback uses a two-frame queue and one displayed texture, with frames capped
