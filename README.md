@@ -34,6 +34,11 @@ artifact only:
 gh workflow run release.yml --ref main
 ```
 
+Release notes are generated from merged PRs and grouped by label
+(`enhancement`, `bug`, `documentation`; anything else goes under "その他"), as set in
+`.github/release.yml`. Bump `version` in `Cargo.toml` before tagging; it is embedded
+in the exe's file properties.
+
 ## Viewing
 
 - Wheel: previous/next image; Ctrl+wheel: zoom at the pointer.
