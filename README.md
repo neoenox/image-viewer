@@ -58,9 +58,10 @@ is observed; pending current-image work takes precedence over preloads.
 
 ## Latency benchmark
 
-An ignored test measures how long the loader takes to produce an image (cold,
-preloaded, and while a large region decode is running). It covers the loader only,
-not rendering or texture upload:
+An ignored test measures how long the background workers take to produce an image:
+cold and preloaded loads, navigation while a large region decode is running, panning
+at original size, a page of thumbnails, and the first frame of a GIF. It covers the
+workers only, not rendering or texture upload:
 
 ```powershell
 cargo test --release loader::bench -- --ignored --nocapture --test-threads=1
