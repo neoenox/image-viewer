@@ -53,6 +53,9 @@ in the exe's file properties.
 - T opens the thumbnail list. Click a thumbnail or filename to select it.
 - Arrow keys (or A / D): previous/next; Home / End: first/last; + / - (or E / Q): zoom; 0: fit;
   R / Shift+R: rotate; F / F11: fullscreen; Space: slideshow; Ctrl+O: open; Esc: leave fullscreen or stop the slideshow.
+- Photos open upright: the EXIF orientation that cameras and phones record (JPEG, PNG,
+  WebP, TIFF) is applied when decoding, so thumbnails, zoom and R / Shift+R start from
+  the upright image.
 - Settings are saved to `%APPDATA%\image-viewer\settings.txt` when changed and loaded at
   startup. Delete the file to return to the defaults.
 
