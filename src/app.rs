@@ -687,7 +687,7 @@ impl ViewerApp {
         img_rect: egui::Rect,
         scale: f32,
     ) -> Option<(egui::TextureId, egui::Rect)> {
-        if self.settings.zoom_quality != crate::settings::ZoomQuality::High
+        if self.settings.zoom_quality == crate::settings::ZoomQuality::Standard
             || self.is_animated()
             || scale <= 1.0
         {
@@ -724,6 +724,13 @@ impl ViewerApp {
                 q(hi.y - lo.y),
             ],
             out,
+            // Sharpen wider the more the view is magnified: the stretched edges are
+            // about `scale` pixels wide on screen.
+            sharpen: if self.settings.zoom_quality == crate::settings::ZoomQuality::Sharp {
+                ((scale / 2.0).round() as u8).clamp(1, 4)
+            } else {
+                0
+            },
         };
         if let Some((done, texture)) = &self.upscale_tex {
             if *done == key {
@@ -1239,6 +1246,13 @@ mod tests {
             app.oriented_base.as_ref().unwrap().2.dimensions(),
             (150, 200)
         );
+        assert_eq!(app.upscale_tex.as_ref().unwrap().0.sharpen, 0);
+
+        // Switching to the sharp setting re-renders the same view with sharpening.
+        app.settings.zoom_quality = crate::settings::ZoomQuality::Sharp;
+        assert!(app.update_upscale(&ctx, view, rotated, 4.0).is_none());
+        wait_upscale(&mut app, &ctx, view, rotated, 4.0);
+        assert_eq!(app.upscale_tex.as_ref().unwrap().0.sharpen, 2);
         std::fs::remove_dir_all(dir).unwrap();
     }
     #[test]

@@ -7,18 +7,22 @@ pub enum ZoomQuality {
     Standard,
     /// Lanczos3 resample of the visible part to screen pixels on a background thread.
     High,
+    /// `High` followed by a light unsharp mask for crisper edges.
+    Sharp,
 }
 impl ZoomQuality {
     fn as_str(self) -> &'static str {
         match self {
             Self::Standard => "standard",
             Self::High => "high",
+            Self::Sharp => "sharp",
         }
     }
     fn parse(value: &str) -> Option<Self> {
         match value {
             "standard" => Some(Self::Standard),
             "high" => Some(Self::High),
+            "sharp" => Some(Self::Sharp),
             _ => None,
         }
     }
@@ -133,6 +137,8 @@ mod tests {
             ViewerSettings::load(&path).zoom_quality,
             ZoomQuality::Standard
         );
+        std::fs::write(&path, "zoom_quality=sharp\n").unwrap();
+        assert_eq!(ViewerSettings::load(&path).zoom_quality, ZoomQuality::Sharp);
         std::fs::remove_dir_all(dir).unwrap();
     }
 }
