@@ -28,10 +28,14 @@ pub(crate) fn rotate_rgba(base: &image::RgbaImage, rotation: u8) -> image::RgbaI
 
 /// テクスチャ上限に収まるよう高速に縮小する。収まっていればそのまま返す。
 /// imageクレートのTriangle（遅い）の代わりにSIMDのfirを使う。
-pub(crate) fn downscale_to_cap(rgba: image::RgbaImage, max_side: usize) -> image::RgbaImage {
+/// リサイズ失敗はパニックではなくエラーとして返す（ワーカーを巻き込まないため）。
+pub(crate) fn downscale_to_cap(
+    rgba: image::RgbaImage,
+    max_side: usize,
+) -> Result<image::RgbaImage, String> {
     let (w, h) = (rgba.width(), rgba.height());
     if w as usize <= max_side && h as usize <= max_side {
-        return rgba;
+        return Ok(rgba);
     }
     let s = max_side as f32 / w.max(h) as f32;
     let (nw, nh) = (
@@ -46,6 +50,7 @@ pub(crate) fn downscale_to_cap(rgba: image::RgbaImage, max_side: usize) -> image
     );
     resizer
         .resize(&src, &mut dst, &options)
-        .expect("fir resize");
-    image::RgbaImage::from_raw(nw, nh, dst.buffer().to_vec()).expect("fir buffer")
+        .map_err(|e| format!("resize failed: {e}"))?;
+    image::RgbaImage::from_raw(nw, nh, dst.buffer().to_vec())
+        .ok_or_else(|| "resize produced a mismatched buffer".to_owned())
 }

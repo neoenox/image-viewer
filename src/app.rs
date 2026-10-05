@@ -219,7 +219,10 @@ impl ViewerApp {
             .unwrap_or_else(|| "image".to_owned());
         if let Some(rgba) = self.oriented_image() {
             // 通常は先読み/読込時に縮小済み。念のため上限ガード。
-            let rgba = downscale_to_cap(rgba, self.tex_cap);
+            let Ok(rgba) = downscale_to_cap(rgba, self.tex_cap) else {
+                self.texture = None;
+                return;
+            };
             let (w, h) = (rgba.width() as usize, rgba.height() as usize);
             let pixels = rgba.into_raw();
             let color = egui::ColorImage::from_rgba_unmultiplied([w, h], &pixels);
@@ -1068,10 +1071,10 @@ mod tests {
     #[test]
     pub(crate) fn downscale_respects_cap() {
         let big = image::RgbaImage::from_pixel(3000, 2000, image::Rgba([1, 2, 3, 255]));
-        let small = downscale_to_cap(big, 2048);
+        let small = downscale_to_cap(big, 2048).unwrap();
         assert_eq!((small.width(), small.height()), (2048, 1365));
         let tiny = image::RgbaImage::from_pixel(100, 80, image::Rgba([1, 2, 3, 255]));
-        let same = downscale_to_cap(tiny, 2048);
+        let same = downscale_to_cap(tiny, 2048).unwrap();
         assert_eq!((same.width(), same.height()), (100, 80));
     }
 
