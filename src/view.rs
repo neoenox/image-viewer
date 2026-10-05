@@ -427,7 +427,7 @@ impl ViewerApp {
                 );
                 ui.checkbox(
                     &mut self.settings.hold_to_peek,
-                    "中ボタンを押している間だけ拡大表示（3倍）",
+                    "中ボタンを押している間だけ拡大表示（2倍）",
                 );
                 ui.checkbox(&mut self.settings.hover_pan, "カーソル位置で画像を見渡す");
                 ui.checkbox(&mut self.settings.auto_hide_toolbar, "操作バーを自動で隠す");

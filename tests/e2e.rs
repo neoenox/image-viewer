@@ -278,7 +278,7 @@ fn peek_zoom_while_holding() {
     let size = app.display_image_size().unwrap();
     let fit_scale = app.current_scale(avail, size.x, size.y); // 1/3
 
-    // 押下 → フィット倍率の3倍へ（等倍に固定しない）
+    // 押下 → フィット倍率の PEEK_MAGNIFICATION 倍へ（等倍に固定しない）
     assert!(app.begin_peek(avail, size.x, size.y));
     assert!(!app.is_fit());
     let peek = fit_scale * PEEK_MAGNIFICATION;
@@ -641,13 +641,14 @@ fn original_size_drives_zoom_and_rotation() {
     assert_eq!(app.texture_size(), Some([2048, 1365]));
     assert_eq!(app.display_image_size(), Some(egui::vec2(3000.0, 2000.0)));
     let size = app.display_image_size().unwrap();
-    // Magnification is relative to the original size: fit is 1/3 here, so the
-    // 3x peek shows the 3000x2000 original at about 100%.
+    // Scale is relative to the original size (not the 2048 px preview): fit is 1/3
+    // here, so the peek shows the 3000x2000 original at PEEK_MAGNIFICATION / 3.
     assert!(app.begin_peek(egui::vec2(1000.0, 700.0), size.x, size.y));
     let scale = app.current_scale(egui::vec2(1000.0, 700.0), size.x, size.y);
-    assert!((scale - 1.0).abs() < 1e-3, "{scale}");
+    let expected = PEEK_MAGNIFICATION / 3.0;
+    assert!((scale - expected).abs() < 1e-3, "{scale}");
     let shown = size * app.zoom_level();
-    assert!((shown.x - 3000.0).abs() < 1.0 && (shown.y - 2000.0).abs() < 1.0);
+    assert!((shown.x - 3000.0 * expected).abs() < 1.0 && (shown.y - 2000.0 * expected).abs() < 1.0);
     app.end_peek();
     app.rotate_cw(&ctx);
     assert_eq!(app.display_image_size(), Some(egui::vec2(2000.0, 3000.0)));

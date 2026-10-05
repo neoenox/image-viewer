@@ -42,7 +42,7 @@ in the exe's file properties.
 ## Viewing
 
 - Wheel: previous/next image; Ctrl+wheel: zoom at the pointer.
-- Hold middle mouse: temporarily magnify 3x (relative to the current view) around the
+- Hold middle mouse: temporarily magnify 2x (relative to the current view) around the
   pointer, release to return.
 - Mouse position: pan across the image; disable this in Settings to use dragging.
 - Move to the top edge to reveal controls. Tab pins/unpins the toolbar.

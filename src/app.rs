@@ -16,7 +16,7 @@ pub(crate) const ICON_FULL: char = '\u{2922}';
 pub(crate) const ICON_ASSOC: char = '\u{1F517}';
 
 /// 中ボタンを押している間の拡大率（押した時点の表示倍率に対する倍数）。
-pub const PEEK_MAGNIFICATION: f32 = 3.0;
+pub const PEEK_MAGNIFICATION: f32 = 2.0;
 
 /// ツールバーで使う全アイコン。tofu防止の回帰テスト用。
 pub const TOOLBAR_ICONS: &[char] = &[
