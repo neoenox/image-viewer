@@ -337,6 +337,15 @@ impl eframe::App for ViewerApp {
                     );
                 }
             }
+            // 高品質拡大: 準備できていれば見えている範囲に重ねて描く
+            if let Some((texture, rect)) = self.update_upscale(ctx, view_rect, img_rect, scale) {
+                ui.painter().image(
+                    texture,
+                    rect,
+                    egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+                    egui::Color32::WHITE,
+                );
+            }
             // アニメ再生中は再描画を続ける
             if self.is_animated() {
                 ctx.request_repaint_after(Duration::from_millis(16));
@@ -431,6 +440,20 @@ impl ViewerApp {
                 );
                 ui.checkbox(&mut self.settings.hover_pan, "カーソル位置で画像を見渡す");
                 ui.checkbox(&mut self.settings.auto_hide_toolbar, "操作バーを自動で隠す");
+                ui.horizontal(|ui| {
+                    use crate::settings::ZoomQuality;
+                    ui.label("拡大時の画質:");
+                    ui.radio_value(
+                        &mut self.settings.zoom_quality,
+                        ZoomQuality::Standard,
+                        "標準",
+                    )
+                    .on_hover_text("GPU で引き伸ばす（最速）");
+                    ui.radio_value(&mut self.settings.zoom_quality, ZoomQuality::High, "高品質")
+                        .on_hover_text(
+                            "拡大中、見えている範囲を Lanczos で計算し直してくっきり表示",
+                        );
+                });
                 ui.separator();
                 ui.small("Ctrl+ホイール:拡大縮小 / ドラッグ:視点移動");
                 ui.small("← →:前後 / R:回転 / 0:フィット / F:全画面");
