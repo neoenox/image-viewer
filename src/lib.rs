@@ -6,6 +6,7 @@ mod imaging;
 mod input;
 mod loader;
 mod settings;
+mod upscale;
 mod view;
 mod win_icon;
 pub use app::{run, setup_jp_font, ViewerApp, PEEK_MAGNIFICATION, TOOLBAR_ICONS};

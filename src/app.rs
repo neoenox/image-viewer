@@ -73,6 +73,16 @@ pub struct ViewerApp {
     pub(crate) base: Option<std::sync::Arc<image::RgbaImage>>,
     pub(crate) texture: Option<egui::TextureHandle>,
     pub(crate) detail_tiles: Vec<(egui::TextureHandle, egui::Rect)>,
+    /// Original-resolution pixels of the current detail region (display
+    /// orientation) and its region, kept for high-quality magnification.
+    pub(crate) detail_rgba: Option<([u32; 4], std::sync::Arc<image::RgbaImage>)>,
+    pub(crate) upscaler: crate::upscale::Upscaler,
+    pub(crate) upscale_tex: Option<(crate::upscale::UpscaleKey, egui::TextureHandle)>,
+    pub(crate) upscale_pending: Option<crate::upscale::UpscaleKey>,
+    /// Last view the worker could not resample; not requested again.
+    pub(crate) upscale_failed: Option<crate::upscale::UpscaleKey>,
+    /// `base` rotated to the display orientation: (generation, rotation, image).
+    pub(crate) oriented_base: Option<(u64, u8, std::sync::Arc<image::RgbaImage>)>,
     pub(crate) load_error: Option<String>,
     pub(crate) zoom: f32,
     pub(crate) fit: bool,
@@ -130,6 +140,12 @@ impl ViewerApp {
             base: None,
             texture: None,
             detail_tiles: Vec::new(),
+            detail_rgba: None,
+            upscaler: crate::upscale::Upscaler::new(),
+            upscale_tex: None,
+            upscale_pending: None,
+            upscale_failed: None,
+            oriented_base: None,
             load_error: None,
             zoom: 1.0,
             fit: true,
@@ -230,6 +246,7 @@ impl ViewerApp {
         self.generation = self.generation.wrapping_add(1);
         self.base_cap = self.tex_cap;
         self.detail_tiles.clear();
+        self.clear_upscale();
         self.detail_key = None;
         self.detail_pending = false;
         self.status_msg.clear();
@@ -303,6 +320,7 @@ impl ViewerApp {
                     self.detail_pending = false;
                     self.detail_tiles.clear();
                     let [x, y, _, _] = detail.key.region;
+                    let region = [x, y, detail.rgba.width(), detail.rgba.height()];
                     let cap = self.tex_cap as u32;
                     for ty in (0..detail.rgba.height()).step_by(cap as usize) {
                         for tx in (0..detail.rgba.width()).step_by(cap as usize) {
@@ -328,6 +346,7 @@ impl ViewerApp {
                             ));
                         }
                     }
+                    self.detail_rgba = Some((region, std::sync::Arc::new(detail.rgba)));
                 }
                 Err((key, error)) if self.detail_key.as_ref() == Some(&key) => {
                     self.detail_pending = false;
@@ -336,7 +355,27 @@ impl ViewerApp {
                 _ => {}
             }
         }
-        if self.loading || self.animation.is_some() || self.detail_pending {
+        if let Some((key, image)) = self.upscaler.poll() {
+            if self.upscale_pending.as_ref() == Some(&key) {
+                self.upscale_pending = None;
+            }
+            if let Some(image) = image {
+                let color = egui::ColorImage::from_rgba_unmultiplied(
+                    [image.width() as usize, image.height() as usize],
+                    image.as_raw(),
+                );
+                // Drawn 1:1 onto physical pixels, so no filtering is needed.
+                let texture = ctx.load_texture("upscale", color, egui::TextureOptions::NEAREST);
+                self.upscale_tex = Some((key, texture));
+            } else {
+                self.upscale_failed = Some(key);
+            }
+        }
+        if self.loading
+            || self.animation.is_some()
+            || self.detail_pending
+            || self.upscale_pending.is_some()
+        {
             ctx.request_repaint_after(Duration::from_millis(16));
         }
     }
@@ -412,6 +451,7 @@ impl ViewerApp {
         }
         self.rotation = (self.rotation + 1) % 4;
         self.detail_tiles.clear();
+        self.clear_upscale();
         self.detail_key = None;
         self.detail_pending = false;
         self.rebuild_texture(ctx);
@@ -423,6 +463,7 @@ impl ViewerApp {
         }
         self.rotation = (self.rotation + 3) % 4;
         self.detail_tiles.clear();
+        self.clear_upscale();
         self.detail_key = None;
         self.detail_pending = false;
         self.rebuild_texture(ctx);
@@ -623,6 +664,124 @@ impl ViewerApp {
             (w, h)
         };
         Some(egui::vec2(w as f32, h as f32))
+    }
+
+    /// Drops everything derived from the current pixels (new image, rotation, ...).
+    pub(crate) fn clear_upscale(&mut self) {
+        self.detail_rgba = None;
+        self.upscale_tex = None;
+        self.upscale_pending = None;
+        self.upscale_failed = None;
+        self.oriented_base = None;
+    }
+
+    /// High-quality magnification of the visible part. While the view is magnified
+    /// past the source pixels, asks the background worker for a Lanczos3 resample
+    /// at exactly the on-screen pixel size, and returns the texture and the screen
+    /// rect to draw it at once the result for this exact view is ready. Until then
+    /// (and while panning) the bilinear preview/detail drawing underneath is shown.
+    pub(crate) fn update_upscale(
+        &mut self,
+        ctx: &egui::Context,
+        view_rect: egui::Rect,
+        img_rect: egui::Rect,
+        scale: f32,
+    ) -> Option<(egui::TextureId, egui::Rect)> {
+        if self.settings.zoom_quality != crate::settings::ZoomQuality::High
+            || self.is_animated()
+            || scale <= 1.0
+        {
+            self.upscale_pending = None;
+            return None;
+        }
+        let visible = view_rect.intersect(img_rect);
+        if !visible.is_positive() {
+            return None;
+        }
+        // Snap to physical pixels so the result maps 1:1 onto the screen.
+        let ppp = ctx.pixels_per_point();
+        let min = (visible.min.to_vec2() * ppp).round();
+        let max = (visible.max.to_vec2() * ppp).round();
+        let out = ((max.x - min.x) as u32, (max.y - min.y) as u32);
+        if out.0 == 0 || out.1 == 0 {
+            return None;
+        }
+        let screen = egui::Rect::from_min_max((min / ppp).to_pos2(), (max / ppp).to_pos2());
+        // Visible part in display-image pixels.
+        let size = img_rect.size() / scale;
+        let lo = ((screen.min - img_rect.min) / scale).max(egui::Vec2::ZERO);
+        let hi = ((screen.max - img_rect.min) / scale).min(size);
+        let (source, origin, id) = self.upscale_source(lo, hi)?;
+        let q = crate::upscale::UpscaleKey::quantize;
+        let key = crate::upscale::UpscaleKey {
+            generation: self.generation,
+            rotation: self.rotation,
+            source: id,
+            crop: [
+                q(lo.x - origin.x),
+                q(lo.y - origin.y),
+                q(hi.x - lo.x),
+                q(hi.y - lo.y),
+            ],
+            out,
+        };
+        if let Some((done, texture)) = &self.upscale_tex {
+            if *done == key {
+                return Some((texture.id(), screen));
+            }
+        }
+        if self.upscale_failed.as_ref() == Some(&key) {
+            return None;
+        }
+        if self.upscale_pending.as_ref() != Some(&key) {
+            self.upscaler.request(key.clone(), source);
+            self.upscale_pending = Some(key);
+        }
+        ctx.request_repaint_after(Duration::from_millis(16));
+        None
+    }
+
+    /// Full-resolution pixels covering `lo..hi` (display-image pixels): the loaded
+    /// original-size region, or the base image when it was never downscaled.
+    /// Returns the image, its offset in the display image, and an identity for keys.
+    fn upscale_source(
+        &mut self,
+        lo: egui::Vec2,
+        hi: egui::Vec2,
+    ) -> Option<(std::sync::Arc<image::RgbaImage>, egui::Vec2, [u32; 4])> {
+        if let Some((region, rgba)) = &self.detail_rgba {
+            let [x, y, w, h] = *region;
+            if lo.x >= x as f32
+                && lo.y >= y as f32
+                && hi.x <= (x + w) as f32
+                && hi.y <= (y + h) as f32
+            {
+                return Some((rgba.clone(), egui::vec2(x as f32, y as f32), *region));
+            }
+        }
+        let base = self.base.as_ref()?;
+        let (ow, oh) = self.orig_dims?;
+        if base.width() != ow || base.height() != oh {
+            return None; // Only a downscaled preview: wait for the original region.
+        }
+        let oriented = match &self.oriented_base {
+            Some((generation, rotation, image))
+                if *generation == self.generation && *rotation == self.rotation =>
+            {
+                image.clone()
+            }
+            _ => {
+                let image = if self.rotation == 0 {
+                    base.clone()
+                } else {
+                    std::sync::Arc::new(rotate_rgba(base, self.rotation))
+                };
+                self.oriented_base = Some((self.generation, self.rotation, image.clone()));
+                image
+            }
+        };
+        let id = [0, 0, oriented.width(), oriented.height()];
+        Some((oriented, egui::Vec2::ZERO, id))
     }
 
     pub(crate) fn request_detail(&mut self, region: [u32; 4]) {
@@ -1004,6 +1163,118 @@ mod tests {
         app.request_detail([0, 0, 256, 256]);
         app.rotate_ccw(&ctx);
         assert!(!app.detail_pending);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    fn wait_upscale(
+        app: &mut ViewerApp,
+        ctx: &egui::Context,
+        view: egui::Rect,
+        img: egui::Rect,
+        scale: f32,
+    ) -> (egui::TextureId, egui::Rect) {
+        let start = Instant::now();
+        loop {
+            if let Some(done) = app.update_upscale(ctx, view, img, scale) {
+                return done;
+            }
+            app.poll_loading(ctx);
+            assert!(
+                start.elapsed() < Duration::from_secs(10),
+                "upscale timed out"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+    #[test]
+    fn high_quality_zoom_resamples_the_visible_part_to_screen_pixels() {
+        let dir = std::env::temp_dir().join(format!("image-viewer-hq-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("small.png");
+        image::RgbaImage::from_fn(200, 150, |x, y| image::Rgba([x as u8, y as u8, 50, 255]))
+            .save(&path)
+            .unwrap();
+        let ctx = egui::Context::default();
+        let _ = ctx.run(egui::RawInput::default(), |_| {});
+        let mut app = ViewerApp::new(None);
+        app.open_path(path, Some(&ctx));
+        settle(&mut app, &ctx);
+
+        // 4x zoom: the 200x150 image becomes 800x600, viewed through a 400x300 window
+        // placed over its top-left quarter.
+        let view = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(400.0, 300.0));
+        let img = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 600.0));
+        let (texture, rect) = wait_upscale(&mut app, &ctx, view, img, 4.0);
+        assert_eq!(rect, view, "drawn exactly over the visible part");
+        let (key, handle) = app.upscale_tex.as_ref().unwrap();
+        assert_eq!(handle.id(), texture);
+        assert_eq!(key.out, (400, 300), "one texel per screen pixel");
+        assert_eq!(key.crop_f64(), [0.0, 0.0, 100.0, 75.0]);
+        // Same view again: served from the finished texture, no new work.
+        assert!(app.update_upscale(&ctx, view, img, 4.0).is_some());
+        assert!(app.upscale_pending.is_none());
+
+        // Panning changes the crop, so the old result is not drawn for the new view.
+        let panned = img.translate(egui::vec2(-80.0, -40.0));
+        assert!(app.update_upscale(&ctx, view, panned, 4.0).is_none());
+        let (_, rect) = wait_upscale(&mut app, &ctx, view, panned, 4.0);
+        assert_eq!(rect, view);
+        assert_eq!(
+            app.upscale_tex.as_ref().unwrap().0.crop_f64(),
+            [20.0, 10.0, 100.0, 75.0]
+        );
+
+        // Not magnified, or the standard setting: nothing to do.
+        assert!(app.update_upscale(&ctx, view, img, 1.0).is_none());
+        app.settings.zoom_quality = crate::settings::ZoomQuality::Standard;
+        assert!(app.update_upscale(&ctx, view, img, 4.0).is_none());
+        assert!(app.upscale_pending.is_none());
+
+        // Rotation drops the old result and resamples the re-oriented image.
+        app.settings.zoom_quality = crate::settings::ZoomQuality::High;
+        app.rotate_cw(&ctx);
+        assert!(app.upscale_tex.is_none());
+        let rotated = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(600.0, 800.0));
+        wait_upscale(&mut app, &ctx, view, rotated, 4.0);
+        assert_eq!(
+            app.oriented_base.as_ref().unwrap().2.dimensions(),
+            (150, 200)
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn high_quality_zoom_waits_for_original_pixels_of_large_images() {
+        let dir = std::env::temp_dir().join(format!("image-viewer-hq-big-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("big.png");
+        image::RgbaImage::from_fn(1400, 1200, |x, y| {
+            image::Rgba([(x % 256) as u8, (y % 256) as u8, 9, 255])
+        })
+        .save(&path)
+        .unwrap();
+        let ctx = egui::Context::default();
+        let _ = ctx.run(
+            egui::RawInput {
+                max_texture_side: Some(1024),
+                ..Default::default()
+            },
+            |_| {},
+        );
+        let mut app = ViewerApp::new(None);
+        app.open_path(path, Some(&ctx));
+        settle(&mut app, &ctx);
+        // The preview is downscaled (1024 px), so its pixels must not be upscaled.
+        let view = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(300.0, 200.0));
+        let img = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(2800.0, 2400.0));
+        assert!(app.update_upscale(&ctx, view, img, 2.0).is_none());
+        assert!(app.upscale_pending.is_none());
+        // Once the original-size region covering the view is loaded, it is used.
+        app.request_detail([0, 0, 256, 256]);
+        settle_detail(&mut app, &ctx);
+        let (_, rect) = wait_upscale(&mut app, &ctx, view, img, 2.0);
+        assert_eq!(rect, view);
+        let key = &app.upscale_tex.as_ref().unwrap().0;
+        assert_eq!(key.source, [0, 0, 256, 256]);
+        assert_eq!(key.crop_f64(), [0.0, 0.0, 150.0, 100.0]);
         std::fs::remove_dir_all(dir).unwrap();
     }
     #[test]
