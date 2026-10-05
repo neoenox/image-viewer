@@ -2,6 +2,7 @@
 //! visible part is resampled with Lanczos3 to exactly the on-screen pixel size on a
 //! background thread, replacing the GPU's bilinear stretch once it is ready.
 
+use crate::sync::{wait_recover, LockRecover};
 use std::sync::{Arc, Condvar, Mutex};
 
 /// Identifies one resampled view; a result is shown only while the view still matches.
@@ -56,7 +57,7 @@ impl Upscaler {
             .spawn(move || loop {
                 let (lock, wake) = &*worker;
                 let request = {
-                    let mut slot = lock.lock().unwrap();
+                    let mut slot = lock.lock_recover();
                     loop {
                         if slot.stopping {
                             return;
@@ -64,11 +65,15 @@ impl Upscaler {
                         if let Some(request) = slot.request.take() {
                             break request;
                         }
-                        slot = wake.wait(slot).unwrap();
+                        slot = wait_recover(wake, slot);
                     }
                 };
-                let image = resample(&request.source, &request.key);
-                let mut slot = lock.lock().unwrap();
+                // A codec panic must not kill the worker; report it as a failed resample.
+                let image = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    resample(&request.source, &request.key)
+                }))
+                .unwrap_or(None);
+                let mut slot = lock.lock_recover();
                 // A newer request supersedes this result; keep only the latest.
                 // Failures are reported too, so the caller stops waiting for them.
                 if slot.request.is_none() {
@@ -81,18 +86,18 @@ impl Upscaler {
     /// Replaces any queued request; work already running finishes and is dropped
     /// if a newer request arrived meanwhile.
     pub fn request(&self, key: UpscaleKey, source: Arc<image::RgbaImage>) {
-        let mut slot = self.shared.0.lock().unwrap();
+        let mut slot = self.shared.0.lock_recover();
         slot.request = Some(Request { key, source });
         slot.result = None;
         self.shared.1.notify_one();
     }
     pub fn poll(&self) -> Option<(UpscaleKey, Option<image::RgbaImage>)> {
-        self.shared.0.lock().unwrap().result.take()
+        self.shared.0.lock_recover().result.take()
     }
 }
 impl Drop for Upscaler {
     fn drop(&mut self) {
-        self.shared.0.lock().unwrap().stopping = true;
+        self.shared.0.lock_recover().stopping = true;
         self.shared.1.notify_one();
     }
 }

@@ -59,7 +59,7 @@ impl Animation {
                             } else {
                                 (u64::from(n) / u64::from(d)).clamp(20, 60000)
                             };
-                            let rgba = downscale_to_cap(frame.into_buffer(), cap.min(1024));
+                            let rgba = downscale_to_cap(frame.into_buffer(), cap.min(1024))?;
                             if !send(
                                 &tx,
                                 &stop,

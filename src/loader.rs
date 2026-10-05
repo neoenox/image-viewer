@@ -1,4 +1,5 @@
 use crate::imaging::{decode_image, downscale_to_cap, rotate_rgba};
+use crate::sync::{catch_panic, wait_recover, LockRecover};
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
@@ -153,7 +154,7 @@ impl ImageLoader {
             .spawn(move || loop {
                 let (lock, wake) = &*worker;
                 let job = {
-                    let mut state = lock.lock().unwrap();
+                    let mut state = lock.lock_recover();
                     loop {
                         if state.stopping {
                             return;
@@ -175,20 +176,20 @@ impl ImageLoader {
                                 break Job::Preload(key);
                             }
                         }
-                        state = wake.wait(state).unwrap();
+                        state = wait_recover(wake, state);
                     }
                 };
                 match job {
                     Job::Current(gen, key) => {
                         let cached = {
-                            let mut state = lock.lock().unwrap();
+                            let mut state = lock.lock_recover();
                             // The same image may already be decoding as a preload:
                             // wait for that result instead of decoding it twice.
                             while state.in_flight(&key) > 1
                                 && state.generation == gen
                                 && !state.stopping
                             {
-                                state = wake.wait(state).unwrap();
+                                state = wait_recover(wake, state);
                             }
                             if state.generation != gen || state.stopping {
                                 state.finish(&key);
@@ -197,8 +198,8 @@ impl ImageLoader {
                             state.touch(&key);
                             state.cache.get(&key).cloned()
                         };
-                        let result = cached.map(Ok).unwrap_or_else(|| load(&key));
-                        let mut state = lock.lock().unwrap();
+                        let result = cached.map(Ok).unwrap_or_else(|| catch_panic(|| load(&key)));
+                        let mut state = lock.lock_recover();
                         state.finish(&key);
                         if state.generation == gen && !state.stopping {
                             if let Ok(image) = &result {
@@ -208,9 +209,13 @@ impl ImageLoader {
                         }
                     }
                     Job::Preload(key) => {
-                        let cached = lock.lock().unwrap().cache.contains_key(&key);
-                        let result = if cached { None } else { Some(load(&key)) };
-                        let mut state = lock.lock().unwrap();
+                        let cached = lock.lock_recover().cache.contains_key(&key);
+                        let result = if cached {
+                            None
+                        } else {
+                            Some(catch_panic(|| load(&key)))
+                        };
+                        let mut state = lock.lock_recover();
                         state.finish(&key);
                         // A current-image job may be waiting for this result.
                         wake.notify_all();
@@ -228,9 +233,11 @@ impl ImageLoader {
                         }
                     }
                     Job::Detail(path, key) => {
-                        let result = detail_source(lock, &path, &key)
-                            .and_then(|source| crop_detail(&source, &key));
-                        let mut state = lock.lock().unwrap();
+                        let result = catch_panic(|| {
+                            detail_source(lock, &path, &key)
+                                .and_then(|source| crop_detail(&source, &key))
+                        });
+                        let mut state = lock.lock_recover();
                         if state.generation == key.generation && !state.stopping {
                             state.detail_result = Some(
                                 result
@@ -248,7 +255,7 @@ impl ImageLoader {
     }
     pub(crate) fn select(&self, generation: u64, path: PathBuf, cap: usize) {
         let (lock, wake) = &*self.shared;
-        let mut state = lock.lock().unwrap();
+        let mut state = lock.lock_recover();
         state.generation = generation;
         if state.detail_src.as_ref().is_some_and(|s| s.path != path) {
             state.detail_src = None;
@@ -260,33 +267,32 @@ impl ImageLoader {
         wake.notify_all();
     }
     pub(crate) fn poll(&self) -> Option<(u64, Result<CachedImage, String>)> {
-        self.shared.0.lock().unwrap().result.take()
+        self.shared.0.lock_recover().result.take()
     }
     pub(crate) fn detail(&self, path: PathBuf, key: DetailKey) {
-        let mut state = self.shared.0.lock().unwrap();
+        let mut state = self.shared.0.lock_recover();
         state.detail = Some((path, key));
         self.shared.1.notify_all();
     }
     pub(crate) fn poll_detail(&self) -> Option<Result<DetailImage, (DetailKey, String)>> {
-        self.shared.0.lock().unwrap().detail_result.take()
+        self.shared.0.lock_recover().detail_result.take()
     }
     pub fn take(&self, path: &Path, cap: usize) -> Option<CachedImage> {
         let key = (path.to_owned(), cap);
-        let mut state = self.shared.0.lock().unwrap();
+        let mut state = self.shared.0.lock_recover();
         state.touch(&key);
         state.cache.get(&key).cloned()
     }
     pub fn is_cached(&self, path: &Path, cap: usize) -> bool {
         self.shared
             .0
-            .lock()
-            .unwrap()
+            .lock_recover()
             .cache
             .contains_key(&(path.to_owned(), cap))
     }
     pub fn request(&self, path: PathBuf, cap: usize) {
         let key = (path, cap);
-        let mut state = self.shared.0.lock().unwrap();
+        let mut state = self.shared.0.lock_recover();
         if state.cache.contains_key(&key)
             || state.is_failed(&key)
             || state.preloads.contains(&key)
@@ -305,12 +311,11 @@ impl ImageLoader {
     pub(crate) fn is_failed(&self, path: &Path, cap: usize) -> bool {
         self.shared
             .0
-            .lock()
-            .unwrap()
+            .lock_recover()
             .is_failed(&(path.to_owned(), cap))
     }
     pub fn prune(&self, keep: &[PathBuf], cap: usize) {
-        let mut state = self.shared.0.lock().unwrap();
+        let mut state = self.shared.0.lock_recover();
         state.keep = keep.to_vec();
         state.keep_cap = Some(cap);
         state
@@ -329,7 +334,7 @@ impl ImageLoader {
 }
 impl Drop for ImageLoader {
     fn drop(&mut self) {
-        self.shared.0.lock().unwrap().stopping = true;
+        self.shared.0.lock_recover().stopping = true;
         self.shared.1.notify_all();
     }
 }
@@ -339,8 +344,7 @@ static LOAD_COUNTS: Mutex<Option<HashMap<PathBuf, usize>>> = Mutex::new(None);
 #[cfg(test)]
 fn load_count(path: &Path) -> usize {
     LOAD_COUNTS
-        .lock()
-        .unwrap()
+        .lock_recover()
         .as_ref()
         .and_then(|m| m.get(path).copied())
         .unwrap_or(0)
@@ -349,8 +353,7 @@ fn load((path, cap): &Key) -> Result<CachedImage, String> {
     #[cfg(test)]
     {
         *LOAD_COUNTS
-            .lock()
-            .unwrap()
+            .lock_recover()
             .get_or_insert_with(HashMap::new)
             .entry(path.clone())
             .or_insert(0) += 1;
@@ -364,7 +367,7 @@ fn load((path, cap): &Key) -> Result<CachedImage, String> {
     reader.limits(image::Limits::default());
     let image = decode_image(path).map_err(|e| e.to_string())?;
     let orig = (image.width(), image.height());
-    let rgba = Arc::new(downscale_to_cap(image.into_rgba8(), (*cap).min(2048)));
+    let rgba = Arc::new(downscale_to_cap(image.into_rgba8(), (*cap).min(2048))?);
     Ok(CachedImage { rgba, orig, gif })
 }
 fn modified_time(path: &Path) -> Option<std::time::SystemTime> {
@@ -378,13 +381,13 @@ fn detail_source(
     key: &DetailKey,
 ) -> Result<Arc<image::RgbaImage>, String> {
     let modified = modified_time(path);
-    if let Some(source) = &lock.lock().unwrap().detail_src {
+    if let Some(source) = &lock.lock_recover().detail_src {
         if source.path == path && source.rotation == key.rotation && source.modified == modified {
             return Ok(source.image.clone());
         }
     }
     let image = Arc::new(decode_detail_source(path, key.rotation)?);
-    let mut state = lock.lock().unwrap();
+    let mut state = lock.lock_recover();
     if state.generation == key.generation && !state.stopping {
         state.detail_src = Some(DetailSource {
             path: path.to_owned(),
@@ -494,7 +497,7 @@ mod tests {
         loader.request(path.clone(), 2048);
         // Wait until the preload worker has picked the job up.
         let start = std::time::Instant::now();
-        while loader.shared.0.lock().unwrap().active.is_empty() {
+        while loader.shared.0.lock_recover().active.is_empty() {
             assert!(start.elapsed() < std::time::Duration::from_secs(5));
             std::thread::yield_now();
         }
@@ -510,7 +513,7 @@ mod tests {
             assert!(start.elapsed() < std::time::Duration::from_secs(10));
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
-        assert!(loader.shared.0.lock().unwrap().active.is_empty());
+        assert!(loader.shared.0.lock_recover().active.is_empty());
         std::fs::remove_dir_all(dir).unwrap();
     }
     #[test]
@@ -556,6 +559,45 @@ mod tests {
     }
 }
 #[cfg(test)]
+mod poison_tests {
+    use super::*;
+    #[test]
+    fn loader_keeps_working_after_the_state_mutex_is_poisoned() {
+        let dir = std::env::temp_dir().join(format!("viewer-poison-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("a.png");
+        image::RgbaImage::new(8, 6).save(&path).unwrap();
+        let loader = ImageLoader::new();
+        let shared = loader.shared.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = shared.0.lock().unwrap();
+            panic!("poison the loader state");
+        })
+        .join();
+        assert!(loader.shared.0.is_poisoned());
+        loader.select(1, path.clone(), 2048);
+        let start = Instant::now();
+        loop {
+            if let Some((_, result)) = loader.poll() {
+                assert_eq!(result.unwrap().orig, (8, 6));
+                break;
+            }
+            assert!(start.elapsed() < Duration::from_secs(10));
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(loader.is_cached(&path, 2048));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn a_panicking_decode_becomes_an_error() {
+        assert_eq!(
+            catch_panic::<()>(|| panic!("codec bug")),
+            Err("decoder panicked".to_owned())
+        );
+        assert_eq!(catch_panic(|| Ok(1)), Ok(1));
+    }
+}
+#[cfg(test)]
 mod detail_tests {
     use super::*;
     #[test]
@@ -591,7 +633,7 @@ mod detail_tests {
         }
     }
     fn source(loader: &ImageLoader) -> Option<(Arc<image::RgbaImage>, u8)> {
-        let state = loader.shared.0.lock().unwrap();
+        let state = loader.shared.0.lock_recover();
         state
             .detail_src
             .as_ref()

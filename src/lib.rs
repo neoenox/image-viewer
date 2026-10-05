@@ -6,6 +6,7 @@ mod imaging;
 mod input;
 mod loader;
 mod settings;
+mod sync;
 mod upscale;
 mod view;
 mod win_icon;
