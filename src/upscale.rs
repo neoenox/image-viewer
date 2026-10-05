@@ -15,6 +15,8 @@ pub(crate) struct UpscaleKey {
     pub crop: [i64; 4],
     /// Output size in physical pixels.
     pub out: (u32, u32),
+    /// Rounds of blur for the unsharp mask applied after resampling; 0 = none.
+    pub sharpen: u8,
 }
 impl UpscaleKey {
     pub fn crop_f64(&self) -> [f64; 4] {
@@ -132,7 +134,112 @@ pub(crate) fn resample(source: &image::RgbaImage, key: &UpscaleKey) -> Option<im
         .resize_alg(fr::ResizeAlg::Convolution(fr::FilterType::Lanczos3))
         .crop(left, top, cw, ch);
     fr::Resizer::new().resize(&src, &mut dst, &options).ok()?;
-    image::RgbaImage::from_raw(w, h, dst.into_vec())
+    let resized = image::RgbaImage::from_raw(w, h, dst.into_vec())?;
+    Some(if key.sharpen > 0 {
+        unsharp(&resized, key.sharpen)
+    } else {
+        resized
+    })
+}
+
+/// Unsharp mask: `out = in + AMOUNT * (in - blur(in))` on the colour channels.
+/// The blur is `passes` rounds of a separable 5-tap binomial kernel (sigma about
+/// sqrt(passes)); callers pass more rounds the more the view is magnified, so the
+/// mask acts on the width of the stretched edges. A general Gaussian blur was ~10x
+/// slower on a 4K view. The strength is deliberately gentle; stronger values ring
+/// around edges. Rows are processed in parallel.
+const SHARPEN_AMOUNT: f32 = 0.6;
+fn unsharp(image: &image::RgbaImage, passes: u8) -> image::RgbaImage {
+    let (w, h) = (image.width() as usize, image.height() as usize);
+    let stride = w * 4;
+    let workers = std::thread::available_parallelism()
+        .map_or(1, |n| n.get())
+        .min(8);
+    let rows_per = h.div_ceil(workers).max(1);
+    let mut blurred = image.as_raw().clone();
+    for _ in 0..passes.max(1) {
+        blurred = blur_once(&blurred, w, h, rows_per);
+    }
+    let mut out = image.clone();
+    std::thread::scope(|scope| {
+        let blurred = &blurred;
+        for (chunk_index, chunk) in out.as_mut().chunks_mut(rows_per * stride).enumerate() {
+            scope.spawn(move || {
+                let base = chunk_index * rows_per * stride;
+                for (i, v) in chunk.iter_mut().enumerate() {
+                    if i % 4 == 3 {
+                        continue;
+                    }
+                    let orig = f32::from(*v);
+                    let blur = f32::from(blurred[base + i]);
+                    *v = (orig + SHARPEN_AMOUNT * (orig - blur))
+                        .round()
+                        .clamp(0.0, 255.0) as u8;
+                }
+            });
+        }
+    });
+    out
+}
+
+/// One separable [1 4 6 4 1] / 16 blur of the RGB channels (alpha copied), edges clamped.
+fn blur_once(src: &[u8], w: usize, h: usize, rows_per: usize) -> Vec<u8> {
+    let stride = w * 4;
+    let mut tmp = vec![0u8; src.len()];
+    std::thread::scope(|scope| {
+        for (chunk_index, chunk) in tmp.chunks_mut(rows_per * stride).enumerate() {
+            scope.spawn(move || {
+                for (r, out_row) in chunk.chunks_mut(stride).enumerate() {
+                    let y = chunk_index * rows_per + r;
+                    let row = &src[y * stride..(y + 1) * stride];
+                    for x in 0..w {
+                        let at = |dx: isize| {
+                            let sx = (x as isize + dx).clamp(0, w as isize - 1) as usize * 4;
+                            &row[sx..sx + 3]
+                        };
+                        let (m2, m1, c0, p1, p2) = (at(-2), at(-1), at(0), at(1), at(2));
+                        for c in 0..3 {
+                            let acc = u32::from(m2[c])
+                                + 4 * u32::from(m1[c])
+                                + 6 * u32::from(c0[c])
+                                + 4 * u32::from(p1[c])
+                                + u32::from(p2[c]);
+                            out_row[x * 4 + c] = ((acc + 8) / 16) as u8;
+                        }
+                        out_row[x * 4 + 3] = row[x * 4 + 3];
+                    }
+                }
+            });
+        }
+    });
+    let mut out = tmp.clone();
+    let tmp = &tmp;
+    std::thread::scope(|scope| {
+        for (chunk_index, chunk) in out.chunks_mut(rows_per * stride).enumerate() {
+            scope.spawn(move || {
+                for (r, out_row) in chunk.chunks_mut(stride).enumerate() {
+                    let y = chunk_index * rows_per + r;
+                    let at = |dy: isize| {
+                        let sy = (y as isize + dy).clamp(0, h as isize - 1) as usize;
+                        &tmp[sy * stride..(sy + 1) * stride]
+                    };
+                    let (m2, m1, c0, p1, p2) = (at(-2), at(-1), at(0), at(1), at(2));
+                    for i in 0..stride {
+                        if i % 4 == 3 {
+                            continue;
+                        }
+                        let acc = u32::from(m2[i])
+                            + 4 * u32::from(m1[i])
+                            + 6 * u32::from(c0[i])
+                            + 4 * u32::from(p1[i])
+                            + u32::from(p2[i]);
+                        out_row[i] = ((acc + 8) / 16) as u8;
+                    }
+                }
+            });
+        }
+    });
+    out
 }
 
 #[cfg(test)]
@@ -146,6 +253,7 @@ mod tests {
             source: [0, 0, 8, 8],
             crop: crop.map(UpscaleKey::quantize),
             out,
+            sharpen: 0,
         }
     }
 
@@ -176,6 +284,51 @@ mod tests {
             v > 16 && v < 240
         });
         assert!(ramp.count() >= 2);
+    }
+
+    #[test]
+    fn sharpening_steepens_edges_without_changing_flat_areas() {
+        // Soft edge: a horizontal ramp from black to white over 8 pixels.
+        let src = image::RgbaImage::from_fn(64, 8, |x, _| {
+            let v = (((x as f32 - 28.0) / 8.0).clamp(0.0, 1.0) * 255.0) as u8;
+            image::Rgba([v, v, v, 255])
+        });
+        let plain = unsharp(&src, 1);
+        // Flat black and white areas are untouched.
+        assert_eq!(plain.get_pixel(2, 4).0, [0, 0, 0, 255]);
+        assert_eq!(plain.get_pixel(60, 4).0, [255, 255, 255, 255]);
+        // Alpha is never modified.
+        assert!(plain.pixels().all(|p| p.0[3] == 255));
+        // The edge gets steeper: the maximum step between neighbours grows.
+        let step = |img: &image::RgbaImage| {
+            (1..64)
+                .map(|x| {
+                    i32::from(img.get_pixel(x, 4).0[0]) - i32::from(img.get_pixel(x - 1, 4).0[0])
+                })
+                .max()
+                .unwrap()
+        };
+        assert!(
+            step(&plain) > step(&src),
+            "{} vs {}",
+            step(&plain),
+            step(&src)
+        );
+    }
+
+    #[test]
+    fn sharpen_flag_changes_the_resampled_output() {
+        let src = image::RgbaImage::from_fn(16, 16, |x, _| {
+            let v = if x < 8 { 30 } else { 220 };
+            image::Rgba([v, v, v, 255])
+        });
+        let soft = key([0.0, 0.0, 16.0, 16.0], (64, 64));
+        let mut sharp = soft.clone();
+        sharp.sharpen = 1;
+        let a = resample(&src, &soft).unwrap();
+        let b = resample(&src, &sharp).unwrap();
+        assert_ne!(a, b);
+        assert_eq!(a.dimensions(), b.dimensions());
     }
 
     #[test]
@@ -242,23 +395,27 @@ mod bench {
             ("window 1100x750 at 8x", (1100, 750), 8.0),
             ("4K 3840x2160 at 2x", (3840, 2160), 2.0),
         ] {
-            let key = UpscaleKey {
-                generation: 1,
-                rotation: 0,
-                source: [0, 0, 2000, 2000],
-                crop: [10.0, 10.0, out.0 as f32 / zoom, out.1 as f32 / zoom]
-                    .map(UpscaleKey::quantize),
-                out,
-            };
-            let mut times: Vec<f64> = (0..5)
-                .map(|_| {
-                    let start = std::time::Instant::now();
-                    resample(&src, &key).unwrap();
-                    start.elapsed().as_secs_f64() * 1000.0
-                })
-                .collect();
-            times.sort_by(|a, b| a.partial_cmp(b).unwrap());
-            println!("BENCH upscale {label}: median {:.1} ms", times[2]);
+            for sharpen in [0u8, 1, 3] {
+                let key = UpscaleKey {
+                    generation: 1,
+                    rotation: 0,
+                    source: [0, 0, 2000, 2000],
+                    crop: [10.0, 10.0, out.0 as f32 / zoom, out.1 as f32 / zoom]
+                        .map(UpscaleKey::quantize),
+                    out,
+                    sharpen,
+                };
+                let mut times: Vec<f64> = (0..5)
+                    .map(|_| {
+                        let start = std::time::Instant::now();
+                        resample(&src, &key).unwrap();
+                        start.elapsed().as_secs_f64() * 1000.0
+                    })
+                    .collect();
+                times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                let mode = format!("sharp{sharpen}");
+                println!("BENCH upscale {mode} {label}: median {:.1} ms", times[2]);
+            }
         }
     }
 }

@@ -453,6 +453,12 @@ impl ViewerApp {
                         .on_hover_text(
                             "拡大中、見えている範囲を Lanczos で計算し直してくっきり表示",
                         );
+                    ui.radio_value(
+                        &mut self.settings.zoom_quality,
+                        ZoomQuality::Sharp,
+                        "シャープ",
+                    )
+                    .on_hover_text("高品質に軽いシャープ処理を加えて輪郭をさらにくっきり");
                 });
                 ui.separator();
                 ui.small("Ctrl+ホイール:拡大縮小 / ドラッグ:視点移動");
