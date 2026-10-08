@@ -1,5 +1,5 @@
-use std::path::{Path, PathBuf};
 use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static SAVE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -104,13 +104,22 @@ impl ViewerSettings {
             self.zoom_quality.as_str()
         );
         // Stage in the same directory and rename; never truncate the live file.
-        let name = path.file_name().ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, "settings file name is missing")
-        })?.to_string_lossy();
+        let name = path
+            .file_name()
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "settings file name is missing",
+                )
+            })?
+            .to_string_lossy();
         let sequence = SAVE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let temp = path.with_file_name(format!("{name}.tmp.{}.{}", std::process::id(), sequence));
         let result = (|| -> std::io::Result<()> {
-            let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&temp)?;
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temp)?;
             file.write_all(text.as_bytes())?;
             file.sync_all()?;
             drop(file);
@@ -146,7 +155,9 @@ mod tests {
         };
         changed.save(&path).unwrap();
         assert_eq!(ViewerSettings::load(&path), changed);
-        assert!(std::fs::read_to_string(&path).unwrap().starts_with("version=1\\n"));
+        assert!(std::fs::read_to_string(&path)
+            .unwrap()
+            .starts_with("version=1\n"));
         // A second save creates a recovery copy before the replacement.
         ViewerSettings::default().save(&path).unwrap();
         assert!(path.with_extension("bak").is_file());
