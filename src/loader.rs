@@ -1,6 +1,5 @@
 use crate::imaging::{
-    decode_image_with_format, decode_image_with_pixel_budget, downscale_to_cap,
-    rotate_rgba,
+    decode_image_with_format, decode_image_with_pixel_budget, downscale_to_cap, rotate_rgba,
 };
 use crate::sync::{catch_panic, wait_recover, LockRecover};
 use std::collections::{HashMap, VecDeque};
