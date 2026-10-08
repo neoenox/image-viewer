@@ -239,6 +239,7 @@ fn blur_once_into(src: &[u8], w: usize, h: usize, rows_per: usize, tmp: &mut [u8
                     let (m2, m1, c0, p1, p2) = (at(-2), at(-1), at(0), at(1), at(2));
                     for i in 0..stride {
                         if i % 4 == 3 {
+                            out_row[i] = c0[i];
                             continue;
                         }
                         let acc = u32::from(m2[i])
