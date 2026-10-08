@@ -271,6 +271,18 @@ mod tests {
     }
 
     #[test]
+    fn repeated_sharpen_preserves_nonopaque_alpha() {
+        let source = image::RgbaImage::from_fn(64, 8, |x, y| {
+            let alpha = ((x * 3 + y * 7) % 256) as u8;
+            image::Rgba([x as u8, y as u8, 90, alpha])
+        });
+        let sharpened = unsharp(&source, 3);
+        for (original, sharpened) in source.pixels().zip(sharpened.pixels()) {
+            assert_eq!(original[3], sharpened[3]);
+        }
+    }
+
+    #[test]
     fn resample_rejects_oversized_output_without_allocating() {
         let image = image::RgbaImage::new(32, 32);
         let mut key = key([0.0, 0.0, 32.0, 32.0], (32, 32));
