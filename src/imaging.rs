@@ -1,6 +1,14 @@
 use std::path::Path;
 pub(crate) const DECODE_BUDGET: u64 = 256 * 1024 * 1024;
 pub fn decode_image(path: &Path) -> image::ImageResult<image::DynamicImage> {
+    decode_image_with_pixel_budget(path, DECODE_BUDGET)
+}
+
+/// Reject oversized full-resolution sources before decoding and allocating RGBA.
+pub(crate) fn decode_image_with_pixel_budget(
+    path: &Path,
+    max_rgba_bytes: u64,
+) -> image::ImageResult<image::DynamicImage> {
     let mut reader = image::ImageReader::open(path)?.with_guessed_format()?;
     let mut limits = image::Limits::default();
     limits.max_alloc = Some(DECODE_BUDGET);
@@ -8,7 +16,9 @@ pub fn decode_image(path: &Path) -> image::ImageResult<image::DynamicImage> {
     let mut decoder = reader.into_decoder()?;
     let (w, h) = image::ImageDecoder::dimensions(&decoder);
     // Includes formats whose decoder only partially supports allocation limits.
-    if u64::from(w) * u64::from(h) * 8 > DECODE_BUDGET {
+    if u64::from(w) * u64::from(h) * 8 > DECODE_BUDGET
+        || u64::from(w) * u64::from(h) * 4 > max_rgba_bytes
+    {
         return Err(image::ImageError::Limits(
             image::error::LimitError::from_kind(image::error::LimitErrorKind::InsufficientMemory),
         ));
@@ -90,6 +100,15 @@ mod tests {
 
     fn is_red(px: &image::Rgba<u8>) -> bool {
         px[0] > 200 && px[2] < 60
+    }
+
+    #[test]
+    fn bounded_decode_rejects_large_source_before_pixel_allocation() {
+        let path = std::env::temp_dir().join(format!("iv-budget-{}.png", std::process::id()));
+        image::RgbaImage::new(32, 32).save(&path).unwrap();
+        assert!(decode_image_with_pixel_budget(&path, 32 * 32 * 4 - 1).is_err());
+        assert!(decode_image_with_pixel_budget(&path, 32 * 32 * 4).is_ok());
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]
