@@ -9,7 +9,22 @@ pub(crate) fn decode_image_with_pixel_budget(
     path: &Path,
     max_rgba_bytes: u64,
 ) -> image::ImageResult<image::DynamicImage> {
+    decode_image_with_budget_and_format(path, max_rgba_bytes).map(|(image, _)| image)
+}
+
+/// Decode once and return its detected format (the thumbnail loader needs GIF detection).
+pub(crate) fn decode_image_with_format(
+    path: &Path,
+) -> image::ImageResult<(image::DynamicImage, Option<image::ImageFormat>)> {
+    decode_image_with_budget_and_format(path, DECODE_BUDGET)
+}
+
+fn decode_image_with_budget_and_format(
+    path: &Path,
+    max_rgba_bytes: u64,
+) -> image::ImageResult<(image::DynamicImage, Option<image::ImageFormat>)> {
     let mut reader = image::ImageReader::open(path)?.with_guessed_format()?;
+    let format = reader.format();
     let mut limits = image::Limits::default();
     limits.max_alloc = Some(DECODE_BUDGET);
     reader.limits(limits);
@@ -29,7 +44,7 @@ pub(crate) fn decode_image_with_pixel_budget(
         .unwrap_or(image::metadata::Orientation::NoTransforms);
     let mut image = image::DynamicImage::from_decoder(decoder)?;
     image.apply_orientation(orientation);
-    Ok(image)
+    Ok((image, format))
 }
 /// 回転を適用する（時計回り90度×n）。
 pub(crate) fn rotate_rgba(base: &image::RgbaImage, rotation: u8) -> image::RgbaImage {
