@@ -112,9 +112,7 @@ impl Drop for Upscaler {
 pub(crate) fn resample(source: &image::RgbaImage, key: &UpscaleKey) -> Option<image::RgbaImage> {
     use fast_image_resize as fr;
     let (w, h) = key.out;
-    if w == 0 || h == 0
-        || u64::from(w) * u64::from(h) * 4 > MAX_UPSCALE_OUTPUT_BYTES
-    {
+    if w == 0 || h == 0 || u64::from(w) * u64::from(h) * 4 > MAX_UPSCALE_OUTPUT_BYTES {
         return None;
     }
     let [left, top, cw, ch] = key.crop_f64();
@@ -200,10 +198,7 @@ fn unsharp(image: &image::RgbaImage, passes: u8) -> image::RgbaImage {
 }
 
 /// One separable [1 4 6 4 1] / 16 blur of the RGB channels (alpha copied), edges clamped.
-fn blur_once_into(
-    src: &[u8], w: usize, h: usize, rows_per: usize,
-    tmp: &mut [u8], out: &mut [u8],
-) {
+fn blur_once_into(src: &[u8], w: usize, h: usize, rows_per: usize, tmp: &mut [u8], out: &mut [u8]) {
     let stride = w * 4;
     std::thread::scope(|scope| {
         for (chunk_index, chunk) in tmp.chunks_mut(rows_per * stride).enumerate() {
