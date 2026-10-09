@@ -84,6 +84,8 @@ pub struct ViewerApp {
     /// `base` rotated to the display orientation: (generation, rotation, image).
     pub(crate) oriented_base: Option<(u64, u8, std::sync::Arc<image::RgbaImage>)>,
     pub(crate) load_error: Option<String>,
+    /// Receiver for a native file dialog running off the egui/UI thread.
+    pub(crate) open_dialog_rx: Option<std::sync::mpsc::Receiver<Option<PathBuf>>>,
     pub(crate) zoom: f32,
     pub(crate) fit: bool,
     pub(crate) rotation: u8, // 0..3 : 時計回り90度 × n
@@ -147,6 +149,7 @@ impl ViewerApp {
             upscale_failed: None,
             oriented_base: None,
             load_error: None,
+            open_dialog_rx: None,
             zoom: 1.0,
             fit: true,
             rotation: 0,
@@ -393,24 +396,21 @@ impl ViewerApp {
             return;
         }
         let n = self.files.len();
-        let at = |i: usize| self.files[i % n].clone();
-        let next = at(self.index + 1);
-        let prev = at(self.index + n - 1);
-        let next2 = at(self.index + 2);
-        let prev2 = at((self.index + n - (2 % n)) % n);
         let current = self.files[self.index].clone();
-        self.loader.prune(
-            &[
-                current,
-                next.clone(),
-                prev.clone(),
-                next2.clone(),
-                prev2.clone(),
-            ],
-            self.tex_cap,
-        );
-        for p in [next, prev, next2, prev2] {
-            self.loader.request(p, self.tex_cap);
+        let mut keep = vec![current];
+        if n < 2 {
+            self.loader.prune(&keep, self.tex_cap);
+            return;
+        }
+        for offset in [1, n - 1, 2, n - 2] {
+            let path = self.files[(self.index + offset) % n].clone();
+            if !keep.contains(&path) {
+                keep.push(path);
+            }
+        }
+        self.loader.prune(&keep, self.tex_cap);
+        for path in keep.into_iter().skip(1) {
+            self.loader.request(path, self.tex_cap);
         }
     }
 
@@ -827,11 +827,51 @@ impl ViewerApp {
             .collect();
     }
 
+    /// Launch a single native picker away from the UI thread.
+    /// The selected path is consumed in poll_open_dialog on the egui thread.
     pub(crate) fn open_dialog(&mut self, ctx: &egui::Context) {
-        let mut dlg = rfd::FileDialog::new().set_title("画像を開く");
-        dlg = dlg.add_filter("画像", SUPPORTED_EXTS);
-        if let Some(path) = dlg.pick_file() {
-            self.open_path(path, Some(ctx));
+        if self.open_dialog_rx.is_some() {
+            return;
+        }
+        let (sender, receiver) = std::sync::mpsc::channel();
+        self.open_dialog_rx = Some(receiver);
+        let repaint = ctx.clone();
+        let spawned = std::thread::Builder::new()
+            .name("image-file-dialog".to_owned())
+            .spawn(move || {
+                let selected = rfd::FileDialog::new()
+                    .set_title("画像を開く")
+                    .add_filter("画像", SUPPORTED_EXTS)
+                    .pick_file();
+                let _ = sender.send(selected);
+                repaint.request_repaint();
+            });
+        if let Err(error) = spawned {
+            self.open_dialog_rx = None;
+            self.load_error = Some(format!("ファイル選択を開始できません: {error}"));
+        }
+    }
+
+    /// Poll without blocking the UI. Cancellation and worker shutdown both
+    /// release the pending picker, allowing the user to open it again.
+    pub(crate) fn poll_open_dialog(&mut self, ctx: &egui::Context) {
+        use std::sync::mpsc::TryRecvError;
+        let Some(receiver) = &self.open_dialog_rx else {
+            return;
+        };
+        match receiver.try_recv() {
+            Ok(path) => {
+                self.open_dialog_rx = None;
+                if let Some(path) = path {
+                    self.open_path(path, Some(ctx));
+                }
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                self.open_dialog_rx = None;
+                self.load_error =
+                    Some("ファイル選択が終了しました。もう一度お試しください。".into());
+            }
         }
     }
 
@@ -843,6 +883,7 @@ impl ViewerApp {
                 .filter_map(|f| f.path.clone())
                 .collect()
         });
+        let dropped_count = dropped.len();
         if let Some(path) = dropped.into_iter().next() {
             if path.is_dir() {
                 if let Some(first) = first_image_in_dir(&path) {
@@ -856,15 +897,29 @@ impl ViewerApp {
                 self.load_error =
                     Some("未対応の形式です（jpg/png/gif/bmp/webp/tiff等に対応）".to_owned());
             }
+            if dropped_count > 1 {
+                let notice = format!(
+                    "{}件のドロップを受け取りました。最初の1件のみ開きます。",
+                    dropped_count
+                );
+                self.load_error = Some(match self.load_error.take() {
+                    Some(error) => format!("{error} {notice}"),
+                    None => notice,
+                });
+            }
         }
     }
+}
+
+fn is_valid_launch_path(path: &Path) -> bool {
+    path.exists() && (path.is_dir() || is_supported(path))
 }
 
 pub fn run() -> eframe::Result<()> {
     let initial: Option<PathBuf> = std::env::args_os()
         .nth(1)
         .map(PathBuf::from)
-        .filter(|p| p.is_dir() || is_supported(p) || p.exists());
+        .filter(|p| is_valid_launch_path(p));
 
     let mut app = ViewerApp::new(initial);
     app.settings_path = crate::settings::ViewerSettings::default_path();
@@ -892,7 +947,61 @@ pub fn run() -> eframe::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cli_only_accepts_existing_supported_paths() {
+        let dir = std::env::temp_dir().join(format!("iv-cli-filter-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let txt = dir.join("note.txt");
+        let png = dir.join("sample.png");
+        std::fs::write(&txt, b"not an image").unwrap();
+        std::fs::write(&png, b"placeholder").unwrap();
+        assert!(is_valid_launch_path(&dir));
+        assert!(is_valid_launch_path(&png));
+        assert!(!is_valid_launch_path(&txt));
+        assert!(!is_valid_launch_path(&dir.join("missing.png")));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     use super::*;
+
+    #[test]
+    fn async_dialog_result_is_handled_without_waiting_on_picker() {
+        let ctx = egui::Context::default();
+        let mut app = ViewerApp::new(None);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        app.open_dialog_rx = Some(receiver);
+        app.poll_open_dialog(&ctx); // A pending dialog must not block.
+        assert!(app.open_dialog_rx.is_some());
+
+        let dir = std::env::temp_dir().join(format!("iv-dialog-result-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("photo.png");
+        image::RgbaImage::new(2, 2).save(&path).unwrap();
+        sender.send(Some(path.clone())).unwrap();
+        app.poll_open_dialog(&ctx);
+        assert!(app.open_dialog_rx.is_none());
+        assert_eq!(app.current_path(), Some(path.as_path()));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn cancelled_or_disconnected_dialog_can_be_reopened() {
+        let ctx = egui::Context::default();
+        let mut app = ViewerApp::new(None);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        app.open_dialog_rx = Some(receiver);
+        sender.send(None).unwrap();
+        app.poll_open_dialog(&ctx);
+        assert!(app.open_dialog_rx.is_none());
+        assert!(app.current_path().is_none());
+
+        let (sender, receiver) = std::sync::mpsc::channel::<Option<PathBuf>>();
+        app.open_dialog_rx = Some(receiver);
+        drop(sender);
+        app.poll_open_dialog(&ctx);
+        assert!(app.open_dialog_rx.is_none());
+        assert!(app.load_error.is_some());
+    }
 
     fn approx(a: f32, b: f32) -> bool {
         (a - b).abs() < 1e-3
