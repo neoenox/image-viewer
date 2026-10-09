@@ -48,7 +48,7 @@ pub fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
                         return ord;
                     }
                     // 数値が等しい場合は元の文字列順（"001" < "01" < "1"）
-                    let ord = na.cmp(&nb);
+                    let ord = na.cmp(nb);
                     if ord != std::cmp::Ordering::Equal {
                         return ord;
                     }
