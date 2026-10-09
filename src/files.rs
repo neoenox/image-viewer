@@ -158,6 +158,9 @@ mod performance_regression_tests {
             .collect();
         sort_image_files(&mut files);
         assert_eq!(files.first().unwrap(), &PathBuf::from("images/photo0.jpg"));
-        assert_eq!(files.last().unwrap(), &PathBuf::from("images/photo1999.jpg"));
+        assert_eq!(
+            files.last().unwrap(),
+            &PathBuf::from("images/photo1999.jpg")
+        );
     }
 }
