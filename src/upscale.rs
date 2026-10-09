@@ -5,6 +5,9 @@
 use crate::sync::{wait_recover, LockRecover};
 use std::sync::{Arc, Condvar, Mutex};
 
+/// 4K output fits; larger canvases are rejected before allocating any buffers.
+const MAX_UPSCALE_OUTPUT_BYTES: u64 = 32 * 1024 * 1024;
+
 /// Identifies one resampled view; a result is shown only while the view still matches.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct UpscaleKey {
@@ -24,6 +27,9 @@ impl UpscaleKey {
         self.crop.map(|v| v as f64 / 16.0)
     }
     pub fn quantize(v: f32) -> i64 {
+        if !v.is_finite() {
+            return i64::MAX; // sentinel: crop bounds validation will reject it
+        }
         (v * 16.0).round() as i64
     }
 }
@@ -106,7 +112,7 @@ impl Drop for Upscaler {
 pub(crate) fn resample(source: &image::RgbaImage, key: &UpscaleKey) -> Option<image::RgbaImage> {
     use fast_image_resize as fr;
     let (w, h) = key.out;
-    if w == 0 || h == 0 {
+    if w == 0 || h == 0 || u64::from(w) * u64::from(h) * 4 > MAX_UPSCALE_OUTPUT_BYTES {
         return None;
     }
     let [left, top, cw, ch] = key.crop_f64();
@@ -159,11 +165,15 @@ fn unsharp(image: &image::RgbaImage, passes: u8) -> image::RgbaImage {
     let stride = w * 4;
     let workers = std::thread::available_parallelism()
         .map_or(1, |n| n.get())
-        .min(8);
+        .min(8)
+        .min(h.max(1));
     let rows_per = h.div_ceil(workers).max(1);
     let mut blurred = image.as_raw().clone();
+    let mut tmp = vec![0u8; blurred.len()];
+    let mut next = vec![0u8; blurred.len()];
     for _ in 0..passes.max(1) {
-        blurred = blur_once(&blurred, w, h, rows_per);
+        blur_once_into(&blurred, w, h, rows_per, &mut tmp, &mut next);
+        std::mem::swap(&mut blurred, &mut next);
     }
     let mut out = image.clone();
     std::thread::scope(|scope| {
@@ -188,9 +198,8 @@ fn unsharp(image: &image::RgbaImage, passes: u8) -> image::RgbaImage {
 }
 
 /// One separable [1 4 6 4 1] / 16 blur of the RGB channels (alpha copied), edges clamped.
-fn blur_once(src: &[u8], w: usize, h: usize, rows_per: usize) -> Vec<u8> {
+fn blur_once_into(src: &[u8], w: usize, h: usize, rows_per: usize, tmp: &mut [u8], out: &mut [u8]) {
     let stride = w * 4;
-    let mut tmp = vec![0u8; src.len()];
     std::thread::scope(|scope| {
         for (chunk_index, chunk) in tmp.chunks_mut(rows_per * stride).enumerate() {
             scope.spawn(move || {
@@ -217,8 +226,7 @@ fn blur_once(src: &[u8], w: usize, h: usize, rows_per: usize) -> Vec<u8> {
             });
         }
     });
-    let mut out = tmp.clone();
-    let tmp = &tmp;
+    let tmp: &[u8] = tmp;
     std::thread::scope(|scope| {
         for (chunk_index, chunk) in out.chunks_mut(rows_per * stride).enumerate() {
             scope.spawn(move || {
@@ -231,6 +239,7 @@ fn blur_once(src: &[u8], w: usize, h: usize, rows_per: usize) -> Vec<u8> {
                     let (m2, m1, c0, p1, p2) = (at(-2), at(-1), at(0), at(1), at(2));
                     for i in 0..stride {
                         if i % 4 == 3 {
+                            out_row[i] = c0[i];
                             continue;
                         }
                         let acc = u32::from(m2[i])
@@ -244,7 +253,6 @@ fn blur_once(src: &[u8], w: usize, h: usize, rows_per: usize) -> Vec<u8> {
             });
         }
     });
-    out
 }
 
 #[cfg(test)]
@@ -260,6 +268,27 @@ mod tests {
             out,
             sharpen: 0,
         }
+    }
+
+    #[test]
+    fn repeated_sharpen_preserves_nonopaque_alpha() {
+        let source = image::RgbaImage::from_fn(64, 8, |x, y| {
+            let alpha = ((x * 3 + y * 7) % 256) as u8;
+            image::Rgba([x as u8, y as u8, 90, alpha])
+        });
+        let sharpened = unsharp(&source, 3);
+        for (original, sharpened) in source.pixels().zip(sharpened.pixels()) {
+            assert_eq!(original[3], sharpened[3]);
+        }
+    }
+
+    #[test]
+    fn resample_rejects_oversized_output_without_allocating() {
+        let image = image::RgbaImage::new(32, 32);
+        let mut key = key([0.0, 0.0, 32.0, 32.0], (32, 32));
+        key.out = (8192, 8192);
+        assert!(resample(&image, &key).is_none());
+        assert_eq!(UpscaleKey::quantize(f32::NAN), i64::MAX);
     }
 
     #[test]

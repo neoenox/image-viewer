@@ -1,4 +1,6 @@
-use crate::imaging::{decode_image, downscale_to_cap, rotate_rgba};
+use crate::imaging::{
+    decode_image_with_format, decode_image_with_pixel_budget, downscale_to_cap, rotate_rgba,
+};
 use crate::sync::{catch_panic, wait_recover, LockRecover};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -20,6 +22,9 @@ const FAILED_RETRY: Duration = Duration::from_secs(5);
 
 // Holds the five-image keep window (current ±2) at the 2048px cap (16MB each).
 pub(crate) const CACHE_BUDGET: usize = 80 * 1024 * 1024;
+/// Full-resolution detail source is separate from the thumbnail cache.
+/// Bound its single retained RGBA buffer to at most 128 MiB.
+const DETAIL_SOURCE_RGBA_BUDGET: u64 = 128 * 1024 * 1024;
 #[derive(Clone)]
 pub struct CachedImage {
     pub rgba: Arc<image::RgbaImage>,
@@ -356,14 +361,9 @@ fn load((path, cap): &Key) -> Result<CachedImage, String> {
             .entry(path.clone())
             .or_insert(0) += 1;
     }
-    let mut reader = image::ImageReader::open(path)
-        .map_err(|e| e.to_string())?
-        .with_guessed_format()
-        .map_err(|e| e.to_string())?;
-    let gif = reader.format() == Some(image::ImageFormat::Gif);
-    // Explicit format fallback follows ImageReader's extension handling.
-    reader.limits(image::Limits::default());
-    let image = decode_image(path).map_err(|e| e.to_string())?;
+    // Reuse the same ImageReader for format detection and decode (no double open/TOCTOU).
+    let (image, format) = decode_image_with_format(path).map_err(|e| e.to_string())?;
+    let gif = format == Some(image::ImageFormat::Gif);
     let orig = (image.width(), image.height());
     let rgba = Arc::new(downscale_to_cap(image.into_rgba8(), (*cap).min(2048))?);
     Ok(CachedImage { rgba, orig, gif })
@@ -397,7 +397,9 @@ fn detail_source(
     Ok(image)
 }
 fn decode_detail_source(path: &Path, rotation: u8) -> Result<image::RgbaImage, String> {
-    let image = decode_image(path).map_err(|e| e.to_string())?.into_rgba8();
+    let image = decode_image_with_pixel_budget(path, DETAIL_SOURCE_RGBA_BUDGET)
+        .map_err(|e| e.to_string())?
+        .into_rgba8();
     Ok(if rotation == 0 {
         image
     } else {
