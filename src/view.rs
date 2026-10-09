@@ -444,6 +444,11 @@ impl ViewerApp {
                 );
                 ui.checkbox(&mut self.settings.hover_pan, "カーソル位置で画像を見渡す");
                 ui.checkbox(&mut self.settings.auto_hide_toolbar, "操作バーを自動で隠す");
+                ui.checkbox(
+                    &mut self.settings.restore_window,
+                    "起動時に前回のウィンドウ状態を復元する",
+                )
+                .on_hover_text("OFF では常に既定サイズ・中央・非最大化で開きます");
                 ui.horizontal(|ui| {
                     use crate::settings::ZoomQuality;
                     ui.label("拡大時の画質:");

@@ -128,6 +128,8 @@ pub struct ViewerApp {
     /// throttled so interactive resizing does not rewrite the file every
     /// frame; the final size is flushed on close (see `track_window_size`).
     pub(crate) last_window_save: Instant,
+    /// Whether the startup monitor-fit check ran (see `window_state`).
+    pub(crate) startup_fit_done: bool,
 }
 
 /// 中ボタン押下中の等倍覗き見（ルーペ）用に退避する表示状態。
@@ -191,6 +193,7 @@ impl ViewerApp {
             show_assoc: false,
             assoc_status: Vec::new(),
             last_window_save: Instant::now(),
+            startup_fit_done: false,
         };
         if let Some(p) = initial {
             if p.is_dir() {
@@ -880,83 +883,6 @@ impl ViewerApp {
         }
     }
 
-    /// Tracks the current window state so the next startup reopens the same
-    /// size, position and maximized state. Called every frame from `update`.
-    ///
-    /// Writes are throttled; the final state is flushed on the close-request
-    /// frame, so killing the process only loses a few seconds at most. This
-    /// deliberately avoids `eframe::App::on_exit`, whose signature depends on
-    /// the glow feature, so any renderer configuration keeps compiling.
-    pub(crate) fn track_window_size(&mut self, ctx: &egui::Context) {
-        let viewport = ctx.input(|i| i.viewport().clone());
-        let before = self.settings.clone();
-        self.update_window_state(&viewport);
-        if self.settings != before
-            && (viewport.close_requested()
-                || self.last_window_save.elapsed() >= Duration::from_secs(2))
-        {
-            self.flush_settings();
-        }
-    }
-
-    /// Copies the current window geometry into the settings (in memory only;
-    /// call [`Self::flush_settings`] to persist).
-    ///
-    /// Maximized/fullscreen windows report the monitor size and position, not
-    /// what the user would want restored as a normal window, so only the
-    /// maximized flag is kept then (the stored normal geometry is untouched).
-    pub(crate) fn update_window_state(&mut self, viewport: &egui::ViewportInfo) {
-        use crate::settings::{MAX_WINDOW_POS, MAX_WINDOW_SIZE, MIN_WINDOW_POS, MIN_WINDOW_SIZE};
-        if self.fullscreen || viewport.fullscreen == Some(true) {
-            return;
-        }
-        if viewport.maximized == Some(true) {
-            self.settings.window_maximized = true;
-            return;
-        }
-        let Some(rect) = viewport.inner_rect else {
-            return;
-        };
-        // Anything bogus is rejected by the range checks below.
-        let (w, h) = (rect.width(), rect.height());
-        if w.is_finite()
-            && h.is_finite()
-            && (MIN_WINDOW_SIZE..=MAX_WINDOW_SIZE).contains(&(w.round() as u32))
-            && (MIN_WINDOW_SIZE..=MAX_WINDOW_SIZE).contains(&(h.round() as u32))
-        {
-            self.settings.window_width = w.round() as u32;
-            self.settings.window_height = h.round() as u32;
-            self.settings.window_maximized = false;
-        }
-        // `with_position` restores the outer (frame/chrome) position, so the
-        // outer rect is saved; the inner rect is only a fallback.
-        let pos = viewport.outer_rect.or(viewport.inner_rect).map(|r| r.min);
-        if let Some(pos) = pos {
-            if pos.x.is_finite() {
-                let x = pos.x.round() as i32;
-                if (MIN_WINDOW_POS..=MAX_WINDOW_POS).contains(&x) {
-                    self.settings.window_x = Some(x);
-                }
-            }
-            if pos.y.is_finite() {
-                let y = pos.y.round() as i32;
-                if (MIN_WINDOW_POS..=MAX_WINDOW_POS).contains(&y) {
-                    self.settings.window_y = Some(y);
-                }
-            }
-        }
-    }
-
-    /// Writes the current settings (including the tracked window state) to disk.
-    pub(crate) fn flush_settings(&mut self) {
-        self.last_window_save = Instant::now();
-        if let Some(path) = &self.settings_path {
-            if let Err(error) = self.settings.save(path) {
-                self.status_msg = format!("設定を保存できませんでした: {error}");
-            }
-        }
-    }
-
     pub(crate) fn apply_dropped(&mut self, ctx: &egui::Context) {
         let dropped: Vec<PathBuf> = ctx.input(|i| {
             i.raw
@@ -1009,21 +935,9 @@ pub fn run() -> eframe::Result<()> {
         app.settings = crate::settings::ViewerSettings::load(path);
     }
     // 前回のウィンドウ状態（サイズ・位置・最大化）で開く。
-    let mut viewport = egui::ViewportBuilder::default()
-        .with_inner_size([
-            app.settings.window_width as f32,
-            app.settings.window_height as f32,
-        ])
-        .with_min_inner_size([640.0, 480.0])
-        .with_drag_and_drop(true);
-    if let (Some(x), Some(y)) = (app.settings.window_x, app.settings.window_y) {
-        viewport = viewport.with_position([x as f32, y as f32]);
-    }
-    if app.settings.window_maximized {
-        viewport = viewport.with_maximized(true);
-    }
+    // 復元OFF・初回・不正値は既定ジオメトリ（詳細は window_state を参照）。
     let options = eframe::NativeOptions {
-        viewport,
+        viewport: crate::window_state::build_viewport(&app.settings),
         ..Default::default()
     };
     eframe::run_native(
@@ -1554,171 +1468,6 @@ mod tests {
             loader.take(&path, 2048).unwrap().rgba.dimensions(),
             (1400, 1200)
         );
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    fn window_info(
-        min: [f32; 2],
-        size: [f32; 2],
-        maximized: bool,
-        close: bool,
-    ) -> egui::ViewportInfo {
-        let rect =
-            egui::Rect::from_min_size(egui::pos2(min[0], min[1]), egui::vec2(size[0], size[1]));
-        egui::ViewportInfo {
-            inner_rect: Some(rect),
-            outer_rect: Some(rect),
-            maximized: Some(maximized),
-            fullscreen: Some(false),
-            events: if close {
-                vec![egui::ViewportEvent::Close]
-            } else {
-                Vec::new()
-            },
-            ..Default::default()
-        }
-    }
-
-    /// 1フレーム分の viewport 情報を流し込み、そのフレームで追跡を実行する。
-    fn track_frame(app: &mut ViewerApp, ctx: &egui::Context, info: egui::ViewportInfo) {
-        let mut raw = egui::RawInput::default();
-        raw.viewports.insert(egui::ViewportId::ROOT, info);
-        let _ = ctx.run(raw, |ctx| app.track_window_size(ctx));
-    }
-
-    #[test]
-    fn window_geometry_tracked_and_flushed_on_close() {
-        let dir = std::env::temp_dir().join(format!("image-viewer-winsize-{}", std::process::id()));
-        let path = dir.join("settings.txt");
-        let ctx = egui::Context::default();
-        let mut app = ViewerApp::new(None);
-        app.settings_path = Some(path.clone());
-        // 通常ウィンドウ: サイズ・位置を追跡し、close 要求で即時保存する。
-        track_frame(
-            &mut app,
-            &ctx,
-            window_info([100.0, 80.0], [1280.0, 800.0], false, true),
-        );
-        assert_eq!(
-            (
-                app.settings.window_width,
-                app.settings.window_height,
-                app.settings.window_x,
-                app.settings.window_y,
-                app.settings.window_maximized,
-            ),
-            (1280, 800, Some(100), Some(80), false)
-        );
-        let saved = std::fs::read_to_string(&path).unwrap();
-        assert!(saved.contains("window_width=1280\n"), "{saved}");
-        assert!(saved.contains("window_x=100\n"), "{saved}");
-        assert!(saved.contains("window_maximized=false\n"), "{saved}");
-        // 保存内容から復元できる。
-        assert_eq!(
-            crate::settings::ViewerSettings::load(&path).window_height,
-            800
-        );
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn window_tracking_skips_maximized_and_fullscreen() {
-        let ctx = egui::Context::default();
-        let mut app = ViewerApp::new(None);
-        app.settings_path = None;
-        track_frame(
-            &mut app,
-            &ctx,
-            window_info([0.0, 0.0], [1920.0, 1080.0], true, false),
-        );
-        // 最大化中はモニターサイズを通常サイズにしない。フラグのみ立つ。
-        assert!(app.settings.window_maximized);
-        assert_eq!(
-            (app.settings.window_width, app.settings.window_height),
-            (
-                crate::settings::DEFAULT_WINDOW_WIDTH,
-                crate::settings::DEFAULT_WINDOW_HEIGHT
-            )
-        );
-        // 通常に戻すとフラグが降り、サイズ・位置が更新される。
-        track_frame(
-            &mut app,
-            &ctx,
-            window_info([50.0, 60.0], [1280.0, 800.0], false, false),
-        );
-        assert!(!app.settings.window_maximized);
-        assert_eq!(
-            (app.settings.window_width, app.settings.window_height),
-            (1280, 800)
-        );
-        assert_eq!(
-            (app.settings.window_x, app.settings.window_y),
-            (Some(50), Some(60))
-        );
-        // 全画面中は一切更新しない。
-        app.fullscreen = true;
-        track_frame(
-            &mut app,
-            &ctx,
-            window_info([0.0, 0.0], [1920.0, 1080.0], false, false),
-        );
-        assert_eq!(
-            (app.settings.window_width, app.settings.window_height),
-            (1280, 800)
-        );
-        assert!(!app.settings.window_maximized);
-    }
-
-    #[test]
-    fn window_tracking_ignores_bogus_rects_and_throttles_writes() {
-        let dir = std::env::temp_dir().join(format!(
-            "image-viewer-winsize-throttle-{}",
-            std::process::id()
-        ));
-        let path = dir.join("settings.txt");
-        let ctx = egui::Context::default();
-        let mut app = ViewerApp::new(None);
-        app.settings_path = Some(path.clone());
-        // 情報なし・ゼロサイズ・NaN では何も変わらず、ファイルも作られない。
-        let mut no_rect = window_info([0.0, 0.0], [1280.0, 800.0], false, false);
-        no_rect.inner_rect = None;
-        no_rect.outer_rect = None;
-        track_frame(&mut app, &ctx, no_rect);
-        // ゼロサイズ・範囲外位置・NaN では何も変わらず、ファイルも作られない。
-        // （位置 (0,0) 自体は正当な値として保存されるため、範囲外位置で検証する）
-        track_frame(
-            &mut app,
-            &ctx,
-            window_info([50000.0, 50000.0], [0.0, 0.0], false, false),
-        );
-        track_frame(
-            &mut app,
-            &ctx,
-            window_info([f32::NAN, f32::NAN], [f32::NAN, 800.0], false, false),
-        );
-        assert_eq!(
-            (app.settings.window_width, app.settings.window_height),
-            (
-                crate::settings::DEFAULT_WINDOW_WIDTH,
-                crate::settings::DEFAULT_WINDOW_HEIGHT
-            )
-        );
-        assert_eq!((app.settings.window_x, app.settings.window_y), (None, None));
-        assert!(!path.exists());
-        // 変更直後はスロットルで保存されないが、間隔が空けば保存される。
-        track_frame(
-            &mut app,
-            &ctx,
-            window_info([10.0, 20.0], [1280.0, 800.0], false, false),
-        );
-        assert!(!path.exists());
-        app.last_window_save = Instant::now() - Duration::from_secs(10);
-        track_frame(
-            &mut app,
-            &ctx,
-            window_info([10.0, 20.0], [1281.0, 800.0], false, false),
-        );
-        assert!(path.exists());
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

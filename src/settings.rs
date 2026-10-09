@@ -6,7 +6,8 @@ pub const DEFAULT_WINDOW_WIDTH: u32 = 1100;
 pub const DEFAULT_WINDOW_HEIGHT: u32 = 750;
 /// Saved window sizes outside this range are rejected (a hand-edited or stale
 /// file must never produce an unusable window); the defaults are used instead.
-pub const MIN_WINDOW_SIZE: u32 = 200;
+/// The lower bound matches the enforced window minimum (640x480).
+pub const MIN_WINDOW_SIZE: u32 = 640;
 pub const MAX_WINDOW_SIZE: u32 = 7680;
 /// Saved window positions outside this range are rejected (a hand-edited file
 /// must never open the window far off-screen); the window is centered instead.
@@ -58,6 +59,9 @@ pub struct ViewerSettings {
     pub window_y: Option<i32>,
     /// Whether the window was maximized when it was last closed.
     pub window_maximized: bool,
+    /// Reopen with the last window size, position and maximized state.
+    /// Off always opens centered at the default size, not maximized.
+    pub restore_window: bool,
 }
 impl Default for ViewerSettings {
     fn default() -> Self {
@@ -72,6 +76,7 @@ impl Default for ViewerSettings {
             window_x: None,
             window_y: None,
             window_maximized: false,
+            restore_window: true,
         }
     }
 }
@@ -135,6 +140,7 @@ impl ViewerSettings {
                 "hover_pan" => settings.hover_pan = value,
                 "auto_hide_toolbar" => settings.auto_hide_toolbar = value,
                 "window_maximized" => settings.window_maximized = value,
+                "restore_window" => settings.restore_window = value,
                 _ => {}
             }
         }
@@ -161,7 +167,16 @@ impl ViewerSettings {
             text.push_str(&format!("window_y={y}\n"));
         }
         text.push_str(&format!("window_maximized={}\n", self.window_maximized));
-        std::fs::write(path, text)
+        text.push_str(&format!("restore_window={}\n", self.restore_window));
+        // Write-then-rename so a crash never leaves a half-written file: the
+        // previous complete file stays in place until the rename. The pid
+        // suffix keeps two running instances from sharing the temp file.
+        let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
+        if let Err(error) = std::fs::write(&tmp, text).and_then(|()| std::fs::rename(&tmp, path)) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(error);
+        }
+        Ok(())
     }
 }
 
@@ -186,9 +201,17 @@ mod tests {
             window_x: Some(100),
             window_y: Some(-20),
             window_maximized: true,
+            restore_window: false,
         };
         changed.save(&path).unwrap();
         assert_eq!(ViewerSettings::load(&path), changed);
+        // The save is atomic: no temp file of this process is left behind.
+        assert!(
+            !path
+                .with_extension(format!("tmp.{}", std::process::id()))
+                .exists(),
+            "stray temp file after save"
+        );
         // Unknown keys and bad values are ignored; known good lines still apply.
         std::fs::write(
             &path,
@@ -234,6 +257,11 @@ mod tests {
         let loaded = ViewerSettings::load(&path);
         assert_eq!((loaded.window_x, loaded.window_y), (Some(-50), None));
         assert!(!loaded.window_maximized);
+        // The restore toggle round-trips; bad values keep the default (true).
+        std::fs::write(&path, "restore_window=false\n").unwrap();
+        assert!(!ViewerSettings::load(&path).restore_window);
+        std::fs::write(&path, "restore_window=maybe\n").unwrap();
+        assert!(ViewerSettings::load(&path).restore_window);
         std::fs::remove_dir_all(dir).unwrap();
     }
 }
