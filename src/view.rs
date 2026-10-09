@@ -11,6 +11,7 @@ impl eframe::App for ViewerApp {
             self.rebuild_texture(ctx);
         }
         self.poll_loading(ctx);
+        self.poll_open_dialog(ctx);
         self.apply_dropped(ctx);
         self.handle_keys(ctx);
         self.handle_wheel_nav(ctx);
