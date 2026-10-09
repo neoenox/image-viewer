@@ -84,6 +84,8 @@ pub struct ViewerApp {
     /// `base` rotated to the display orientation: (generation, rotation, image).
     pub(crate) oriented_base: Option<(u64, u8, std::sync::Arc<image::RgbaImage>)>,
     pub(crate) load_error: Option<String>,
+    /// Receiver for a native file dialog running off the egui/UI thread.
+    pub(crate) open_dialog_rx: Option<std::sync::mpsc::Receiver<Option<PathBuf>>>,
     pub(crate) zoom: f32,
     pub(crate) fit: bool,
     pub(crate) rotation: u8, // 0..3 : 時計回り90度 × n
@@ -147,6 +149,7 @@ impl ViewerApp {
             upscale_failed: None,
             oriented_base: None,
             load_error: None,
+            open_dialog_rx: None,
             zoom: 1.0,
             fit: true,
             rotation: 0,
@@ -824,11 +827,50 @@ impl ViewerApp {
             .collect();
     }
 
+    /// Launch a single native picker away from the UI thread.
+    /// The selected path is consumed in poll_open_dialog on the egui thread.
     pub(crate) fn open_dialog(&mut self, ctx: &egui::Context) {
-        let mut dlg = rfd::FileDialog::new().set_title("画像を開く");
-        dlg = dlg.add_filter("画像", SUPPORTED_EXTS);
-        if let Some(path) = dlg.pick_file() {
-            self.open_path(path, Some(ctx));
+        if self.open_dialog_rx.is_some() {
+            return;
+        }
+        let (sender, receiver) = std::sync::mpsc::channel();
+        self.open_dialog_rx = Some(receiver);
+        let repaint = ctx.clone();
+        let spawned = std::thread::Builder::new()
+            .name("image-file-dialog".to_owned())
+            .spawn(move || {
+                let selected = rfd::FileDialog::new()
+                    .set_title("画像を開く")
+                    .add_filter("画像", SUPPORTED_EXTS)
+                    .pick_file();
+                let _ = sender.send(selected);
+                repaint.request_repaint();
+            });
+        if let Err(error) = spawned {
+            self.open_dialog_rx = None;
+            self.load_error = Some(format!("ファイル選択を開始できません: {error}"));
+        }
+    }
+
+    /// Poll without blocking the UI. Cancellation and worker shutdown both
+    /// release the pending picker, allowing the user to open it again.
+    pub(crate) fn poll_open_dialog(&mut self, ctx: &egui::Context) {
+        use std::sync::mpsc::TryRecvError;
+        let Some(receiver) = &self.open_dialog_rx else {
+            return;
+        };
+        match receiver.try_recv() {
+            Ok(path) => {
+                self.open_dialog_rx = None;
+                if let Some(path) = path {
+                    self.open_path(path, Some(ctx));
+                }
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                self.open_dialog_rx = None;
+                self.load_error = Some("ファイル選択が終了しました。もう一度お試しください。".into());
+            }
         }
     }
 
@@ -920,6 +962,48 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn async_dialog_result_is_handled_without_waiting_on_picker() {
+        let ctx = egui::Context::default();
+        let mut app = ViewerApp::new(None);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        app.open_dialog_rx = Some(receiver);
+        app.poll_open_dialog(&ctx); // A pending dialog must not block.
+        assert!(app.open_dialog_rx.is_some());
+
+        let dir = std::env::temp_dir().join(format!(
+            "iv-dialog-result-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("photo.png");
+        image::RgbaImage::new(2, 2).save(&path).unwrap();
+        sender.send(Some(path.clone())).unwrap();
+        app.poll_open_dialog(&ctx);
+        assert!(app.open_dialog_rx.is_none());
+        assert_eq!(app.current_path(), Some(path.as_path()));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn cancelled_or_disconnected_dialog_can_be_reopened() {
+        let ctx = egui::Context::default();
+        let mut app = ViewerApp::new(None);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        app.open_dialog_rx = Some(receiver);
+        sender.send(None).unwrap();
+        app.poll_open_dialog(&ctx);
+        assert!(app.open_dialog_rx.is_none());
+        assert!(app.current_path().is_none());
+
+        let (sender, receiver) = std::sync::mpsc::channel::<Option<PathBuf>>();
+        app.open_dialog_rx = Some(receiver);
+        drop(sender);
+        app.poll_open_dialog(&ctx);
+        assert!(app.open_dialog_rx.is_none());
+        assert!(app.load_error.is_some());
+    }
 
     fn approx(a: f32, b: f32) -> bool {
         (a - b).abs() < 1e-3
