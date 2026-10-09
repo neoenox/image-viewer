@@ -314,7 +314,8 @@ impl ImageLoader {
     }
     pub fn prune(&self, keep: &[PathBuf], cap: usize) {
         let mut state = self.shared.0.lock_recover();
-        state.keep = keep.iter().cloned().collect();
+        // 照合はHashSetで1回だけ固め、3つのretainを線形にする。
+        let keep: HashSet<PathBuf> = keep.iter().cloned().collect();
         state.keep_cap = Some(cap);
         state
             .failed
@@ -328,6 +329,7 @@ impl ImageLoader {
         let keys: HashSet<_> = state.cache.keys().cloned().collect();
         state.order.retain(|k| keys.contains(k));
         state.bytes = state.cache.values().map(|v| v.rgba.as_raw().len()).sum();
+        state.keep = keep;
     }
 }
 impl Drop for ImageLoader {

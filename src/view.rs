@@ -1,6 +1,7 @@
 use crate::app::*;
 use crate::{assoc, SUPPORTED_EXTS};
 use eframe::egui;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 impl eframe::App for ViewerApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
@@ -485,10 +486,12 @@ impl ViewerApp {
     fn thumbnail_panel(&mut self, ctx: &egui::Context) {
         if !self.show_thumbnails {
             self.thumbnails.clear();
+            self.thumb_lru.clear();
+            self.thumb_retained.clear();
             return;
         }
         let mut selected = None;
-        let mut keep = Vec::new();
+        let mut visible = Vec::new();
         egui::SidePanel::left("thumbnails")
             .exact_width(156.0)
             .resizable(false)
@@ -502,7 +505,7 @@ impl ViewerApp {
                 egui::ScrollArea::vertical().show_rows(ui, 104.0, self.files.len(), |ui, rows| {
                     for index in rows {
                         let path = self.files[index].clone();
-                        keep.push(path.clone());
+                        visible.push(path.clone());
                         if !self.thumbnails.contains_key(&path) {
                             if let Some(image) = self.thumbnail_loader.take(&path, 128) {
                                 let color = egui::ColorImage::from_rgba_unmultiplied(
@@ -552,11 +555,72 @@ impl ViewerApp {
                     }
                 });
             });
-        self.thumbnails.retain(|path, _| keep.contains(path));
-        self.thumbnail_loader.prune(&keep, 128);
+        // 保持は可視と分離する：可視分を新世代として記録し、上限超過分だけ
+        // 落とす。スクロールバックはキャッシュに当たる。
+        self.retain_visible_thumbs(visible);
+        let retained: Vec<PathBuf> = self.thumb_retained.iter().cloned().collect();
+        self.thumbnails
+            .retain(|path, _| self.thumb_retained.contains(path));
+        self.thumbnail_loader.prune(&retained, 128);
         if let Some(index) = selected {
             self.goto(index, ctx);
         }
         ctx.request_repaint_after(Duration::from_millis(100));
+    }
+
+    /// 可視サムネイルを新世代として記録し、上限超過の古世代を落とす。
+    /// テクスチャ・デコード済み・失敗記録の保持はこの世代で統一する。
+    pub(crate) fn retain_visible_thumbs(&mut self, visible: Vec<PathBuf>) {
+        for path in visible {
+            if self.thumb_lru.back() != Some(&path) {
+                self.thumb_lru.retain(|p| p != &path);
+                self.thumb_lru.push_back(path.clone());
+            }
+            self.thumb_retained.insert(path);
+        }
+        while self.thumb_lru.len() > THUMB_KEEP_MAX {
+            if let Some(old) = self.thumb_lru.pop_front() {
+                self.thumb_retained.remove(&old);
+                self.thumbnails.remove(&old);
+            } else {
+                break;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn thumb_path(i: usize) -> PathBuf {
+        PathBuf::from(format!("thumb-{i:03}.png"))
+    }
+
+    #[test]
+    fn thumb_recency_evicts_oldest_past_cap() {
+        let mut app = ViewerApp::new(None);
+        let paths: Vec<PathBuf> = (0..70).map(thumb_path).collect();
+        app.retain_visible_thumbs(paths);
+        assert_eq!(app.thumb_retained.len(), THUMB_KEEP_MAX);
+        assert_eq!(app.thumb_lru.len(), THUMB_KEEP_MAX);
+        // Oldest six are gone, newest kept.
+        for i in 0..6 {
+            assert!(!app.thumb_retained.contains(&thumb_path(i)));
+        }
+        for i in 6..70 {
+            assert!(app.thumb_retained.contains(&thumb_path(i)));
+        }
+        // Re-touching moves to the back.
+        app.retain_visible_thumbs(vec![thumb_path(6)]);
+        assert_eq!(app.thumb_lru.back(), Some(&thumb_path(6)));
+        // 64 newer entries evict the 64 oldest ({7..69} and 6).
+        let more: Vec<PathBuf> = (70..134).map(thumb_path).collect();
+        app.retain_visible_thumbs(more);
+        assert_eq!(app.thumb_retained.len(), THUMB_KEEP_MAX);
+        assert!(!app.thumb_retained.contains(&thumb_path(7)));
+        assert!(!app.thumb_retained.contains(&thumb_path(6)));
+        assert!(app.thumb_retained.contains(&thumb_path(70)));
+        assert!(app.thumb_retained.contains(&thumb_path(133)));
     }
 }
