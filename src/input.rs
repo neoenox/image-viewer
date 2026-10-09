@@ -4,14 +4,16 @@ use std::time::{Duration, Instant};
 /// Carry the unused fraction into the next frame instead of dropping fast
 /// wheel events. Cap work per frame without losing the remaining movement.
 fn wheel_navigation_steps(accum: &mut f32, delta: f32) -> i32 {
-    const THRESHOLD: f32 = 20.0;
+    const THRESHOLD: f32 = 40.0;
     const MAX_STEPS: i32 = 4;
     if !delta.is_finite() {
         *accum = 0.0;
         return 0;
     }
     *accum += delta;
-    let steps = (*accum / THRESHOLD).trunc().clamp(-(MAX_STEPS as f32), MAX_STEPS as f32) as i32;
+    let steps = (*accum / THRESHOLD)
+        .trunc()
+        .clamp(-(MAX_STEPS as f32), MAX_STEPS as f32) as i32;
     *accum -= steps as f32 * THRESHOLD;
     steps
 }
@@ -48,9 +50,8 @@ impl ViewerApp {
         if ctx.input(|i| i.key_pressed(egui::Key::T)) {
             self.show_thumbnails = !self.show_thumbnails;
         }
-        let open_key = ctx.input(|i| {
-            i.key_pressed(egui::Key::O) && (i.modifiers.ctrl || i.modifiers.command)
-        });
+        let open_key =
+            ctx.input(|i| i.key_pressed(egui::Key::O) && (i.modifiers.ctrl || i.modifiers.command));
         if ctx.input(|i| i.key_pressed(egui::Key::ArrowRight) || i.key_pressed(egui::Key::D)) {
             self.next(ctx);
         }
@@ -189,15 +190,15 @@ mod tests {
     #[test]
     fn wheel_delta_keeps_remainder_and_drains_burst() {
         let mut carry = 0.0;
-        assert_eq!(wheel_navigation_steps(&mut carry, 45.0), 2);
+        assert_eq!(wheel_navigation_steps(&mut carry, 45.0), 1);
         assert_eq!(carry, 5.0);
-        assert_eq!(wheel_navigation_steps(&mut carry, 15.0), 1);
+        assert_eq!(wheel_navigation_steps(&mut carry, 35.0), 1);
         assert_eq!(carry, 0.0);
-        assert_eq!(wheel_navigation_steps(&mut carry, -180.0), -4);
-        assert_eq!(carry, -100.0);
-        assert_eq!(wheel_navigation_steps(&mut carry, 0.0), -4);
-        assert_eq!(carry, -20.0);
+        assert_eq!(wheel_navigation_steps(&mut carry, -220.0), -4);
+        assert_eq!(carry, -60.0);
         assert_eq!(wheel_navigation_steps(&mut carry, 0.0), -1);
+        assert_eq!(carry, -20.0);
+        assert_eq!(wheel_navigation_steps(&mut carry, -20.0), -1);
         assert_eq!(carry, 0.0);
     }
 
