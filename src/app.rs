@@ -124,6 +124,12 @@ pub struct ViewerApp {
     pub(crate) thumbnail_loader: ImageLoader,
     pub(crate) show_assoc: bool,
     pub(crate) assoc_status: Vec<(String, bool)>,
+    /// Last time the tracked window size was written to disk. Writes are
+    /// throttled so interactive resizing does not rewrite the file every
+    /// frame; the final size is flushed on close (see `track_window_size`).
+    pub(crate) last_window_save: Instant,
+    /// Whether the startup monitor-fit check ran (see `window_state`).
+    pub(crate) startup_fit_done: bool,
 }
 
 /// 中ボタン押下中の等倍覗き見（ルーペ）用に退避する表示状態。
@@ -186,6 +192,8 @@ impl ViewerApp {
             thumbnail_loader: ImageLoader::for_thumbnails(),
             show_assoc: false,
             assoc_status: Vec::new(),
+            last_window_save: Instant::now(),
+            startup_fit_done: false,
         };
         if let Some(p) = initial {
             if p.is_dir() {
@@ -926,11 +934,10 @@ pub fn run() -> eframe::Result<()> {
     if let Some(path) = &app.settings_path {
         app.settings = crate::settings::ViewerSettings::load(path);
     }
+    // 前回のウィンドウ状態（サイズ・位置・最大化）で開く。
+    // 復元OFF・初回・不正値は既定ジオメトリ（詳細は window_state を参照）。
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1100.0, 750.0])
-            .with_min_inner_size([640.0, 480.0])
-            .with_drag_and_drop(true),
+        viewport: crate::window_state::build_viewport(&app.settings),
         ..Default::default()
     };
     eframe::run_native(

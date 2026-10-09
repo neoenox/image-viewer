@@ -5,6 +5,9 @@ use std::time::{Duration, Instant};
 impl eframe::App for ViewerApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         crate::win_icon::apply(frame);
+        // 現在のウィンドウ状態（サイズ・位置・最大化）を追跡し、次回起動時に
+        // 復元できるようにする。終了時フラッシュもここで行う。
+        self.track_window_size(ctx);
         // GPU上限を最新化（先読みの縮小サイズに使う）
         let cap = ctx.input(|i| i.max_texture_side).max(512);
         if cap != self.tex_cap {
@@ -441,6 +444,11 @@ impl ViewerApp {
                 );
                 ui.checkbox(&mut self.settings.hover_pan, "カーソル位置で画像を見渡す");
                 ui.checkbox(&mut self.settings.auto_hide_toolbar, "操作バーを自動で隠す");
+                ui.checkbox(
+                    &mut self.settings.restore_window,
+                    "起動時に前回のウィンドウ状態を復元する",
+                )
+                .on_hover_text("OFF では常に既定サイズ・中央・非最大化で開きます");
                 ui.horizontal(|ui| {
                     use crate::settings::ZoomQuality;
                     ui.label("拡大時の画質:");
