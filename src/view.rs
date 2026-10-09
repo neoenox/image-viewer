@@ -5,6 +5,9 @@ use std::time::{Duration, Instant};
 impl eframe::App for ViewerApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         crate::win_icon::apply(frame);
+        // 現在のウィンドウ状態（サイズ・位置・最大化）を追跡し、次回起動時に
+        // 復元できるようにする。終了時フラッシュもここで行う。
+        self.track_window_size(ctx);
         // GPU上限を最新化（先読みの縮小サイズに使う）
         let cap = ctx.input(|i| i.max_texture_side).max(512);
         if cap != self.tex_cap {
