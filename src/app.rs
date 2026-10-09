@@ -24,6 +24,11 @@ pub const TOOLBAR_ICONS: &[char] = &[
     ICON_FULL, ICON_ASSOC,
 ];
 
+/// Full-size rotated copies up to this are cached (`oriented_base`); bigger
+/// ones are re-rotated per upscale request. Bounds the rotation double-hold
+/// well below the decode budget while keeping normal images jank-free.
+pub(crate) const ORIENTED_CACHE_MAX_BYTES: usize = 64 * 1024 * 1024;
+
 pub fn setup_jp_font(ctx: &egui::Context) {
     let candidates = [
         "NotoSansJP-VF.ttf",
@@ -82,6 +87,8 @@ pub struct ViewerApp {
     /// Last view the worker could not resample; not requested again.
     pub(crate) upscale_failed: Option<crate::upscale::UpscaleKey>,
     /// `base` rotated to the display orientation: (generation, rotation, image).
+    /// Only modest rotations are cached (see [`ORIENTED_CACHE_MAX_BYTES`]);
+    /// huge ones are re-rotated per upscale request to bound memory.
     pub(crate) oriented_base: Option<(u64, u8, std::sync::Arc<image::RgbaImage>)>,
     pub(crate) load_error: Option<String>,
     /// Receiver for a native file dialog running off the egui/UI thread.
@@ -714,7 +721,9 @@ impl ViewerApp {
         let size = img_rect.size() / scale;
         let lo = ((screen.min - img_rect.min) / scale).max(egui::Vec2::ZERO);
         let hi = ((screen.max - img_rect.min) / scale).min(size);
-        let (source, origin, id) = self.upscale_source(lo, hi)?;
+        // Identify first without allocating: the rotation below runs only when
+        // a new request is actually sent, never while waiting for one.
+        let (id, origin) = self.upscale_source_id(lo, hi)?;
         let q = crate::upscale::UpscaleKey::quantize;
         let key = crate::upscale::UpscaleKey {
             generation: self.generation,
@@ -744,6 +753,7 @@ impl ViewerApp {
             return None;
         }
         if self.upscale_pending.as_ref() != Some(&key) {
+            let source = self.upscale_source(id)?;
             self.upscaler.request(key.clone(), source);
             self.upscale_pending = Some(key);
         }
@@ -753,20 +763,17 @@ impl ViewerApp {
 
     /// Full-resolution pixels covering `lo..hi` (display-image pixels): the loaded
     /// original-size region, or the base image when it was never downscaled.
-    /// Returns the image, its offset in the display image, and an identity for keys.
-    fn upscale_source(
-        &mut self,
-        lo: egui::Vec2,
-        hi: egui::Vec2,
-    ) -> Option<(std::sync::Arc<image::RgbaImage>, egui::Vec2, [u32; 4])> {
-        if let Some((region, rgba)) = &self.detail_rgba {
+    /// Returns the source identity and its offset for key building. Allocates
+    /// nothing, so it is safe to call every frame while waiting for a request.
+    fn upscale_source_id(&self, lo: egui::Vec2, hi: egui::Vec2) -> Option<([u32; 4], egui::Vec2)> {
+        if let Some((region, _)) = &self.detail_rgba {
             let [x, y, w, h] = *region;
             if lo.x >= x as f32
                 && lo.y >= y as f32
                 && hi.x <= (x + w) as f32
                 && hi.y <= (y + h) as f32
             {
-                return Some((rgba.clone(), egui::vec2(x as f32, y as f32), *region));
+                return Some((*region, egui::vec2(x as f32, y as f32)));
             }
         }
         let base = self.base.as_ref()?;
@@ -774,6 +781,23 @@ impl ViewerApp {
         if base.width() != ow || base.height() != oh {
             return None; // Only a downscaled preview: wait for the original region.
         }
+        let (w, h) = if self.rotation % 2 == 1 {
+            (oh, ow)
+        } else {
+            (ow, oh)
+        };
+        Some(([0, 0, w, h], egui::Vec2::ZERO))
+    }
+
+    /// Materializes the pixels for an identity from [`Self::upscale_source_id`].
+    /// Rotates (and caches, when modest) only here, i.e. once per new request.
+    fn upscale_source(&mut self, id: [u32; 4]) -> Option<std::sync::Arc<image::RgbaImage>> {
+        if let Some((region, rgba)) = &self.detail_rgba {
+            if *region == id {
+                return Some(rgba.clone());
+            }
+        }
+        let base = self.base.as_ref()?.clone();
         let oriented = match &self.oriented_base {
             Some((generation, rotation, image))
                 if *generation == self.generation && *rotation == self.rotation =>
@@ -781,17 +805,24 @@ impl ViewerApp {
                 image.clone()
             }
             _ => {
-                let image = if self.rotation == 0 {
-                    base.clone()
+                if self.rotation == 0 {
+                    let image = base.clone();
+                    self.oriented_base = Some((self.generation, self.rotation, image.clone()));
+                    image
                 } else {
-                    std::sync::Arc::new(rotate_rgba(base, self.rotation))
-                };
-                self.oriented_base = Some((self.generation, self.rotation, image.clone()));
-                image
+                    // Huge rotations skip the cache: re-rotating per view costs
+                    // CPU but never doubles a giant allocation.
+                    let rotated = std::sync::Arc::new(rotate_rgba(&base, self.rotation));
+                    if rotated.as_raw().len() <= ORIENTED_CACHE_MAX_BYTES {
+                        self.oriented_base =
+                            Some((self.generation, self.rotation, rotated.clone()));
+                    }
+                    rotated
+                }
             }
         };
-        let id = [0, 0, oriented.width(), oriented.height()];
-        Some((oriented, egui::Vec2::ZERO, id))
+        debug_assert_eq!([0, 0, oriented.width(), oriented.height()], id);
+        Some(oriented)
     }
 
     pub(crate) fn request_detail(&mut self, region: [u32; 4]) {
@@ -1462,5 +1493,40 @@ mod tests {
             (1400, 1200)
         );
         std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn huge_rotated_image_skips_oriented_cache() {
+        let ctx = egui::Context::default();
+        let _ = ctx.run(egui::RawInput::default(), |_| {});
+        let mut app = ViewerApp::new(None);
+        // Install an over-threshold base directly: the loader caps previews at
+        // 2048px, so this guards the bound if caps ever rise. 80 MiB is over
+        // the 64 MiB rotation-cache threshold.
+        app.base = Some(std::sync::Arc::new(image::RgbaImage::from_pixel(
+            5000,
+            4000,
+            image::Rgba([7, 8, 9, 255]),
+        )));
+        app.orig_dims = Some((5000, 4000));
+        app.rotation = 1;
+        // Display is 4000x5000 after the rotation, magnified 2x.
+        let view = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(300.0, 200.0));
+        let img = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(8000.0, 10000.0));
+        let start = Instant::now();
+        loop {
+            if app.update_upscale(&ctx, view, img, 2.0).is_some() {
+                break;
+            }
+            app.poll_loading(&ctx);
+            assert!(
+                start.elapsed() < Duration::from_secs(60),
+                "upscale timed out (failed: {:?})",
+                app.upscale_failed.is_some()
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        // Served from a per-request rotation: no second full copy is kept.
+        assert!(app.oriented_base.is_none());
+        assert!(app.upscale_tex.is_some());
     }
 }
