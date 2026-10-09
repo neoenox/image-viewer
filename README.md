@@ -57,7 +57,8 @@ in the exe's file properties.
   WebP, TIFF) is applied when decoding, so thumbnails, zoom and R / Shift+R start from
   the upright image.
 - Settings are saved to `%APPDATA%\image-viewer\settings.txt` when changed and loaded at
-  startup. Delete the file to return to the defaults.
+  startup. Delete the file to return to the defaults. The window size, position and
+  maximized state are saved there too, so the viewer reopens where you left it.
 
 The image being opened, neighbour preloads, and original-size region decoding each
 run on their own background worker, so opening an image never waits behind a preload
