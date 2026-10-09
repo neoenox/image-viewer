@@ -869,7 +869,8 @@ impl ViewerApp {
             Err(TryRecvError::Empty) => {}
             Err(TryRecvError::Disconnected) => {
                 self.open_dialog_rx = None;
-                self.load_error = Some("ファイル選択が終了しました。もう一度お試しください。".into());
+                self.load_error =
+                    Some("ファイル選択が終了しました。もう一度お試しください。".into());
             }
         }
     }
@@ -972,10 +973,7 @@ mod tests {
         app.poll_open_dialog(&ctx); // A pending dialog must not block.
         assert!(app.open_dialog_rx.is_some());
 
-        let dir = std::env::temp_dir().join(format!(
-            "iv-dialog-result-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("iv-dialog-result-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("photo.png");
         image::RgbaImage::new(2, 2).save(&path).unwrap();
