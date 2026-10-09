@@ -24,6 +24,10 @@ pub const TOOLBAR_ICONS: &[char] = &[
     ICON_FULL, ICON_ASSOC,
 ];
 
+/// 可視行を超えて保持するサムネイル上限（LRU）。128pxタイルは約64KiB/枚の
+/// ため数MiBで収まり、数画面分のスクロールバックを再デコードなしで返す。
+pub(crate) const THUMB_KEEP_MAX: usize = 64;
+
 pub fn setup_jp_font(ctx: &egui::Context) {
     let candidates = [
         "NotoSansJP-VF.ttf",
@@ -122,6 +126,10 @@ pub struct ViewerApp {
     pub(crate) toolbar_pinned: bool,
     pub(crate) thumbnails: std::collections::HashMap<PathBuf, egui::TextureHandle>,
     pub(crate) thumbnail_loader: ImageLoader,
+    /// Recently visible thumbnails, most-recent last; retention is decoupled
+    /// from visibility so scrolling back does not re-decode.
+    pub(crate) thumb_lru: std::collections::VecDeque<PathBuf>,
+    pub(crate) thumb_retained: std::collections::HashSet<PathBuf>,
     pub(crate) show_assoc: bool,
     pub(crate) assoc_status: Vec<(String, bool)>,
 }
@@ -184,6 +192,8 @@ impl ViewerApp {
             toolbar_pinned: false,
             thumbnails: std::collections::HashMap::new(),
             thumbnail_loader: ImageLoader::for_thumbnails(),
+            thumb_lru: std::collections::VecDeque::new(),
+            thumb_retained: std::collections::HashSet::new(),
             show_assoc: false,
             assoc_status: Vec::new(),
         };
@@ -242,6 +252,10 @@ impl ViewerApp {
         self.rotation = 0;
         self.fit = true;
         self.zoom = 1.0;
+        // 別フォルダの一覧になったため、サムネイルの保持世代を捨てる
+        // （次フレームの可視分から作り直す。古いパスは触れない）。
+        self.thumb_lru.clear();
+        self.thumb_retained.clear();
         self.load_current(ctx);
     }
 
