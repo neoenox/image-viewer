@@ -1,22 +1,55 @@
 use crate::app::*;
 use eframe::egui;
 use std::time::{Duration, Instant};
+/// Carry the unused fraction into the next frame instead of dropping fast
+/// wheel events. Cap work per frame without losing the remaining movement.
+fn wheel_navigation_steps(accum: &mut f32, delta: f32) -> i32 {
+    const THRESHOLD: f32 = 20.0;
+    const MAX_STEPS: i32 = 4;
+    if !delta.is_finite() {
+        *accum = 0.0;
+        return 0;
+    }
+    *accum += delta;
+    let steps = (*accum / THRESHOLD).trunc().clamp(-(MAX_STEPS as f32), MAX_STEPS as f32) as i32;
+    *accum -= steps as f32 * THRESHOLD;
+    steps
+}
+
 impl ViewerApp {
     pub(crate) fn handle_keys(&mut self, ctx: &egui::Context) {
+        // Escape works while a modal is open; other shortcuts must not leak
+        // into the viewer during modal or text input.
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            if self.show_settings {
+                self.show_settings = false;
+                return;
+            }
+            if self.show_assoc {
+                self.show_assoc = false;
+                return;
+            }
+            if self.fullscreen {
+                self.fullscreen = false;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+                return;
+            }
+            if self.slideshow {
+                self.slideshow = false;
+                return;
+            }
+        }
+        if self.show_settings || self.show_assoc || ctx.wants_keyboard_input() {
+            return;
+        }
         if ctx.input(|i| i.key_pressed(egui::Key::Tab)) {
             self.toolbar_pinned = !self.toolbar_pinned;
         }
-        if ctx.input(|i| i.key_pressed(egui::Key::T)) && !self.show_settings && !self.show_assoc {
+        if ctx.input(|i| i.key_pressed(egui::Key::T)) {
             self.show_thumbnails = !self.show_thumbnails;
         }
-        if self.show_settings || self.show_assoc {
-            return;
-        }
-        let (open_key, quit_esc) = ctx.input(|i| {
-            let open = i.key_pressed(egui::Key::O) && i.modifiers.ctrl
-                || i.key_pressed(egui::Key::O) && i.modifiers.command;
-            let esc = i.key_pressed(egui::Key::Escape);
-            (open, esc)
+        let open_key = ctx.input(|i| {
+            i.key_pressed(egui::Key::O) && (i.modifiers.ctrl || i.modifiers.command)
         });
         if ctx.input(|i| i.key_pressed(egui::Key::ArrowRight) || i.key_pressed(egui::Key::D)) {
             self.next(ctx);
@@ -25,13 +58,11 @@ impl ViewerApp {
             self.prev(ctx);
         }
         if ctx.input(|i| i.key_pressed(egui::Key::Home)) && !self.files.is_empty() {
-            let ctx2 = ctx.clone();
-            self.goto(0, &ctx2);
+            self.goto(0, ctx);
         }
         if ctx.input(|i| i.key_pressed(egui::Key::End)) && !self.files.is_empty() {
             let n = self.files.len() - 1;
-            let ctx2 = ctx.clone();
-            self.goto(n, &ctx2);
+            self.goto(n, ctx);
         }
         if self.texture.is_some() {
             if ctx.input(|i| {
@@ -63,19 +94,11 @@ impl ViewerApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.fullscreen));
         }
         if ctx.input(|i| i.key_pressed(egui::Key::Space)) {
-            self.slideshow = !self.slideshow;
-            self.last_advance = Some(Instant::now());
+            self.slideshow = self.files.len() >= 2 && !self.slideshow;
+            self.last_advance = self.slideshow.then(Instant::now);
         }
         if open_key {
             self.open_dialog(ctx);
-        }
-        if quit_esc {
-            if self.fullscreen {
-                self.fullscreen = false;
-                ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
-            } else if self.slideshow {
-                self.slideshow = false;
-            }
         }
     }
 
@@ -126,18 +149,15 @@ impl ViewerApp {
         // smoothは複数フレームに分散して遅く感じるためrawを使う。
         // 1ノッチ≒±40なので、しきい値20で確実に1枚進む。
         let y = ctx.input(|i| i.raw_scroll_delta.y);
-        if y == 0.0 {
-            return;
-        }
-        self.wheel_accum += y;
-        if self.wheel_accum <= -20.0 {
-            // 手前（下）回し = 次へ
-            self.next(ctx);
-            self.wheel_accum = 0.0;
-        } else if self.wheel_accum >= 20.0 {
-            // 奥（上）回し = 前へ
-            self.prev(ctx);
-            self.wheel_accum = 0.0;
+        let steps = wheel_navigation_steps(&mut self.wheel_accum, y);
+        if steps < 0 {
+            for _ in 0..steps.unsigned_abs() {
+                self.next(ctx);
+            }
+        } else {
+            for _ in 0..steps as u32 {
+                self.prev(ctx);
+            }
         }
     }
 
@@ -159,5 +179,32 @@ impl ViewerApp {
                 ctx.request_repaint_after(interval);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::wheel_navigation_steps;
+
+    #[test]
+    fn wheel_delta_keeps_remainder_and_drains_burst() {
+        let mut carry = 0.0;
+        assert_eq!(wheel_navigation_steps(&mut carry, 45.0), 2);
+        assert_eq!(carry, 5.0);
+        assert_eq!(wheel_navigation_steps(&mut carry, 15.0), 1);
+        assert_eq!(carry, 0.0);
+        assert_eq!(wheel_navigation_steps(&mut carry, -180.0), -4);
+        assert_eq!(carry, -100.0);
+        assert_eq!(wheel_navigation_steps(&mut carry, 0.0), -4);
+        assert_eq!(carry, -20.0);
+        assert_eq!(wheel_navigation_steps(&mut carry, 0.0), -1);
+        assert_eq!(carry, 0.0);
+    }
+
+    #[test]
+    fn wheel_discard_non_finite_delta() {
+        let mut carry = 5.0;
+        assert_eq!(wheel_navigation_steps(&mut carry, f32::INFINITY), 0);
+        assert_eq!(carry, 0.0);
     }
 }
