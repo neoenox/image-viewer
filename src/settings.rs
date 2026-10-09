@@ -1,4 +1,8 @@
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static SAVE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// How the image is drawn when magnified past its source pixels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -92,14 +96,43 @@ impl ViewerSettings {
             std::fs::create_dir_all(dir)?;
         }
         let text = format!(
-            "wheel_navigation={}\nhold_to_peek={}\nhover_pan={}\nauto_hide_toolbar={}\nzoom_quality={}\n",
+            "version=1\nwheel_navigation={}\nhold_to_peek={}\nhover_pan={}\nauto_hide_toolbar={}\nzoom_quality={}\n",
             self.wheel_navigation,
             self.hold_to_peek,
             self.hover_pan,
             self.auto_hide_toolbar,
             self.zoom_quality.as_str()
         );
-        std::fs::write(path, text)
+        // Stage in the same directory and rename; never truncate the live file.
+        let name = path
+            .file_name()
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "settings file name is missing",
+                )
+            })?
+            .to_string_lossy();
+        let sequence = SAVE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let temp = path.with_file_name(format!("{name}.tmp.{}.{}", std::process::id(), sequence));
+        let result = (|| -> std::io::Result<()> {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temp)?;
+            file.write_all(text.as_bytes())?;
+            file.sync_all()?;
+            drop(file);
+            // Keep a copy of the last readable settings for recovery.
+            if path.is_file() {
+                std::fs::copy(path, path.with_extension("bak"))?;
+            }
+            std::fs::rename(&temp, path)
+        })();
+        if result.is_err() {
+            std::fs::remove_file(&temp).ok();
+        }
+        result
     }
 }
 
@@ -122,6 +155,14 @@ mod tests {
         };
         changed.save(&path).unwrap();
         assert_eq!(ViewerSettings::load(&path), changed);
+        assert!(std::fs::read_to_string(&path)
+            .unwrap()
+            .starts_with("version=1\n"));
+        // A second save creates a recovery copy before the replacement.
+        ViewerSettings::default().save(&path).unwrap();
+        assert!(path.with_extension("bak").is_file());
+        assert_eq!(ViewerSettings::load(&path), ViewerSettings::default());
+        changed.save(&path).unwrap();
         // Unknown keys and bad values are ignored; known good lines still apply.
         std::fs::write(
             &path,
