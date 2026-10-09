@@ -420,6 +420,7 @@ fn numeric_filenames_sort_naturally() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+#[cfg(windows)]
 #[test]
 fn assoc_register_status_unregister() {
     use image_viewer::assoc;
