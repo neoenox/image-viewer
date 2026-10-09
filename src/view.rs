@@ -276,19 +276,27 @@ impl eframe::App for ViewerApp {
 
             // マウス位置連動で視点移動（ドラッグ不要）。
             // 右端に寄せると画像右側、左端で左側が見える。覗き見中も追従する。
+            // ドラッグ中はドラッグを優先し、離したらホバー連動に戻る。
+            let mut dragging = false;
+            if !self.fit {
+                let drag = ui.interact(view_rect, egui::Id::new("image-pan"), egui::Sense::drag());
+                if drag.dragged() {
+                    dragging = true;
+                    self.pan_offset += ctx.input(|i| i.pointer.delta());
+                }
+            }
             if self.fit {
                 self.pan_offset = egui::Vec2::ZERO;
-            } else if self.settings.hover_pan && hover_in_view && avail.x > 0.0 && avail.y > 0.0 {
+            } else if !dragging
+                && self.settings.hover_pan
+                && hover_in_view
+                && avail.x > 0.0
+                && avail.y > 0.0
+            {
                 let rel = hover.unwrap() - view_rect.min;
                 let tx = (rel.x / avail.x).clamp(0.0, 1.0);
                 let ty = (rel.y / avail.y).clamp(0.0, 1.0);
                 self.pan_offset = Self::pan_for_hover(avail, disp, tx, ty);
-            }
-            if !self.settings.hover_pan && !self.fit {
-                let drag = ui.interact(view_rect, egui::Id::new("image-pan"), egui::Sense::drag());
-                if drag.dragged() {
-                    self.pan_offset += ctx.input(|i| i.pointer.delta());
-                }
             }
             self.clamp_pan(avail, disp);
             let center = view_rect.center() + self.pan_offset;
@@ -462,8 +470,13 @@ impl ViewerApp {
                     .on_hover_text("高品質に軽いシャープ処理を加えて輪郭をさらにくっきり");
                 });
                 ui.separator();
-                ui.small("Ctrl+ホイール:拡大縮小 / ドラッグ:視点移動");
-                ui.small("← →:前後 / R:回転 / 0:フィット / F:全画面");
+                if self.settings.wheel_navigation {
+                    ui.small("ホイール:前後 / Ctrl+ホイール:拡大縮小 / ドラッグ:視点移動");
+                } else {
+                    ui.small("ホイール:拡大縮小 / ドラッグ:視点移動");
+                }
+                ui.small("← →:前後 / R:回転 / 0:フィット / F:全画面 / Space:再生");
+                ui.small("+ / - (E/Q):拡大縮小 / T:一覧 / Tab:バー固定");
                 if self.settings_path.is_some() {
                     ui.small("設定は自動で保存され、次回の起動時にも使われます。");
                 } else {
