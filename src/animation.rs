@@ -11,11 +11,24 @@ pub(crate) struct Frame {
     pub rgba: image::RgbaImage,
     pub delay: Duration,
     pub index: usize,
-    pub total: usize,
+    /// Total frame count, known only after the first loop completes.
+    pub total: Option<usize>,
 }
+
+/// Endless GIF player fed by a background thread (two queued frames).
+///
+/// Policy (#38):
+/// - Loops the file until cancelled. A file open/decode error terminates the
+///   stream with a sticky `Err`; playback never auto-retries. Recovery happens
+///   by recreating the player (e.g. navigating images recreates it).
+/// - `total` is unknown during the first loop (`None`); exact afterwards.
+/// - Dropping the player signals cancellation and disconnects the channel, so
+///   the worker can only be inside one bounded decode before it exits. It is
+///   deliberately never joined: dropping must not block the UI thread.
 pub(crate) struct Animation {
-    rx: mpsc::Receiver<Result<Frame, String>>,
+    rx: Option<mpsc::Receiver<Result<Frame, String>>>,
     cancelled: Arc<AtomicBool>,
+    failed: Option<String>,
 }
 impl Animation {
     pub fn new(path: PathBuf, cap: usize) -> Self {
@@ -26,7 +39,7 @@ impl Animation {
         std::thread::Builder::new()
             .name("gif-stream".into())
             .spawn(move || {
-                let mut total = 0;
+                let mut total = None;
                 let result = (|| -> Result<(), String> {
                     loop {
                         if stop.load(Ordering::Relaxed) {
@@ -77,7 +90,7 @@ impl Animation {
                         if count == 0 {
                             return Err("GIFにフレームがありません".into());
                         }
-                        total = count;
+                        total = Some(count);
                     }
                 })();
                 if let Err(error) = result {
@@ -85,34 +98,50 @@ impl Animation {
                 }
             })
             .expect("gif stream");
-        Self { rx, cancelled }
+        Self {
+            rx: Some(rx),
+            cancelled,
+            failed: None,
+        }
     }
-    pub fn poll(&self) -> Option<Result<Frame, String>> {
-        self.rx.try_recv().ok()
+    pub fn poll(&mut self) -> Option<Result<Frame, String>> {
+        // A terminal error sticks: once failed, polls keep reporting the
+        // error instead of reverting to "pending" (None).
+        if let Some(error) = &self.failed {
+            return Some(Err(error.clone()));
+        }
+        let rx = self.rx.as_ref()?;
+        match rx.try_recv() {
+            Ok(Err(error)) => {
+                self.failed = Some(error.clone());
+                Some(Err(error))
+            }
+            Ok(frame) => Some(frame),
+            Err(_) => None,
+        }
     }
 }
+/// Blocking send with backpressure instead of a sleep-spin. Only the worker
+/// thread ever blocks here (never the UI thread). A dropped player
+/// disconnects the channel, which wakes a parked send immediately, so
+/// cancellation is always noticed promptly.
 fn send(
     tx: &mpsc::SyncSender<Result<Frame, String>>,
     stop: &AtomicBool,
-    mut frame: Result<Frame, String>,
+    frame: Result<Frame, String>,
 ) -> bool {
-    loop {
-        if stop.load(Ordering::Relaxed) {
-            return false;
-        }
-        match tx.try_send(frame) {
-            Ok(()) => return true,
-            Err(mpsc::TrySendError::Disconnected(_)) => return false,
-            Err(mpsc::TrySendError::Full(value)) => {
-                frame = value;
-                std::thread::sleep(Duration::from_millis(5));
-            }
-        }
+    if stop.load(Ordering::Relaxed) {
+        return false;
     }
+    tx.send(frame).is_ok()
 }
 impl Drop for Animation {
     fn drop(&mut self) {
+        // Signal first so a worker between frames exits without touching the
+        // channel; then disconnect so a worker parked in send wakes up. Never
+        // joined: dropping must not block the UI thread.
         self.cancelled.store(true, Ordering::Relaxed);
+        self.rx.take();
     }
 }
 #[cfg(test)]
@@ -136,7 +165,7 @@ mod tests {
                     .unwrap();
             }
         }
-        let stream = Animation::new(path.clone(), 2048);
+        let mut stream = Animation::new(path.clone(), 2048);
         let start = std::time::Instant::now();
         let mut seen = 0;
         while seen < 243 {
@@ -145,7 +174,10 @@ mod tests {
                 assert_eq!(frame.index, seen % 241);
                 assert_eq!(frame.rgba.get_pixel(0, 0).0[0], (seen % 241) as u8);
                 if seen >= 241 {
-                    assert_eq!(frame.total, 241);
+                    assert_eq!(frame.total, Some(241));
+                } else {
+                    // Unknown until the first loop completes.
+                    assert_eq!(frame.total, None);
                 }
                 seen += 1;
             }
@@ -163,5 +195,26 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         panic!("GIF worker did not release file after cancellation");
+    }
+
+    #[test]
+    fn failure_is_sticky_and_distinguishable_from_pending() {
+        let missing =
+            std::env::temp_dir().join(format!("viewer-no-such-{}.gif", std::process::id()));
+        let mut animation = Animation::new(missing, 2048);
+        let start = std::time::Instant::now();
+        loop {
+            match animation.poll() {
+                Some(Err(_)) => break,
+                Some(Ok(_)) => panic!("unexpected frame from a missing file"),
+                None => {
+                    assert!(start.elapsed() < Duration::from_secs(10));
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+            }
+        }
+        // Stays failed instead of reverting to "pending".
+        assert!(matches!(animation.poll(), Some(Err(_))));
+        assert!(matches!(animation.poll(), Some(Err(_))));
     }
 }

@@ -827,7 +827,7 @@ mod bench {
         let mut gif_first = Vec::new();
         for _ in 0..5 {
             let start = Instant::now();
-            let animation = crate::animation::Animation::new(gif.clone(), 2048);
+            let mut animation = crate::animation::Animation::new(gif.clone(), 2048);
             loop {
                 if let Some(frame) = animation.poll() {
                     assert!(frame.is_ok());
