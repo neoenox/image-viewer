@@ -445,7 +445,6 @@ fn assoc_register_status_unregister() {
     key.set_value("ProgId", &"Original.App").unwrap();
     key.set_value("Hash", &"OriginalHash").unwrap();
     let exe = std::env::current_exe().unwrap();
-    let exe_name = exe.file_name().unwrap().to_str().unwrap();
     let check = || {
         assert_eq!(
             hkcu.open_subkey(&classes)
@@ -481,7 +480,7 @@ fn assoc_register_status_unregister() {
         assoc::register(prog, app, caps, &exe, &[ext, absent_ext]).unwrap();
         check();
     }
-    assoc::unregister(prog, app, caps, exe_name).unwrap();
+    assoc::unregister(prog, app, caps, &exe).unwrap();
     check();
     assert!(hkcu
         .open_subkey(format!(r"Software\Classes\{prog}"))
@@ -709,4 +708,51 @@ fn rapid_navigation_applies_only_latest_image() {
     assert_eq!(app.image_dims(), Some((40, 30)));
     assert_eq!(app.texture_size(), Some([40, 30]));
     cleanup(&dir);
+}
+
+#[test]
+fn print_assoc_config_reports_canonical_constants() {
+    // 実バイナリを子プロセス起動し、PSラッパー向け定数出力を検証する。
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_image-viewer"))
+        .arg("--print-assoc-config")
+        .output()
+        .expect("failed to run image-viewer --print-assoc-config");
+    assert!(
+        output.status.success(),
+        "exit status: {:?}",
+        output.status.code()
+    );
+    let text = String::from_utf8(output.stdout).expect("config must be UTF-8");
+    let mut config = std::collections::HashMap::new();
+    for line in text.lines() {
+        let Some((key, value)) = line.split_once('=') else {
+            panic!("malformed config line: {line:?}");
+        };
+        config.insert(key.to_owned(), value.to_owned());
+    }
+    assert_eq!(config.get("format").map(String::as_str), Some("1"));
+    assert_eq!(
+        config.get("prog_id").map(String::as_str),
+        Some(image_viewer::assoc::PROG_ID)
+    );
+    assert_eq!(
+        config.get("app_name").map(String::as_str),
+        Some(image_viewer::assoc::APP_NAME)
+    );
+    assert_eq!(
+        config.get("caps_base").map(String::as_str),
+        Some(image_viewer::assoc::CAPS_BASE)
+    );
+    let app_exe = config.get("app_exe").expect("app_exe missing");
+    assert!(
+        app_exe.eq_ignore_ascii_case("image-viewer.exe"),
+        "app_exe: {app_exe}"
+    );
+    let exts: Vec<&str> = config
+        .get("exts")
+        .expect("exts missing")
+        .split(',')
+        .collect();
+    assert!(exts.contains(&"jpg") && exts.contains(&"png") && exts.contains(&"gif"));
+    assert_eq!(exts.len(), image_viewer::SUPPORTED_EXTS.len());
 }

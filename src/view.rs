@@ -365,16 +365,26 @@ impl eframe::App for ViewerApp {
                     ui.heading(format!("関連付け: {done}/{total} 済み"));
                     ui.add_space(4.0);
                     if ui.button("関連付けを設定する").clicked() {
-                        if let Ok(exe) = assoc::exe_path() {
-                            let _ = assoc::register(
-                                assoc::PROG_ID,
-                                assoc::APP_NAME,
-                                assoc::CAPS_BASE,
-                                &exe,
-                                SUPPORTED_EXTS,
-                            );
+                        match assoc::exe_path() {
+                            Ok(exe) => {
+                                if let Err(error) = assoc::register(
+                                    assoc::PROG_ID,
+                                    assoc::APP_NAME,
+                                    assoc::CAPS_BASE,
+                                    &exe,
+                                    SUPPORTED_EXTS,
+                                ) {
+                                    self.status_msg =
+                                        format!("関連付け登録に失敗しました: {error}");
+                                }
+                            }
+                            Err(error) => {
+                                self.status_msg = format!("関連付け登録に失敗しました: {error}");
+                            }
                         }
-                        let _ = assoc::open_default_apps();
+                        if let Err(error) = assoc::open_default_apps() {
+                            self.status_msg = format!("設定画面を開けませんでした: {error}");
+                        }
                         self.refresh_assoc_status();
                     }
                     ui.small("登録後に設定画面が開くので、各形式をクリックして確定。");
@@ -384,17 +394,22 @@ impl eframe::App for ViewerApp {
                             self.refresh_assoc_status();
                         }
                         if ui.small_button("登録を解除").clicked() {
-                            if let Ok(exe) = assoc::exe_path() {
-                                let name = exe
-                                    .file_name()
-                                    .map(|s| s.to_string_lossy().into_owned())
-                                    .unwrap_or_else(|| "image-viewer.exe".to_owned());
-                                let _ = assoc::unregister(
-                                    assoc::PROG_ID,
-                                    assoc::APP_NAME,
-                                    assoc::CAPS_BASE,
-                                    &name,
-                                );
+                            match assoc::exe_path() {
+                                Ok(exe) => {
+                                    if let Err(error) = assoc::unregister(
+                                        assoc::PROG_ID,
+                                        assoc::APP_NAME,
+                                        assoc::CAPS_BASE,
+                                        &exe,
+                                    ) {
+                                        self.status_msg =
+                                            format!("関連付け解除に失敗しました: {error}");
+                                    }
+                                }
+                                Err(error) => {
+                                    self.status_msg =
+                                        format!("関連付け解除に失敗しました: {error}");
+                                }
                             }
                             self.refresh_assoc_status();
                         }
