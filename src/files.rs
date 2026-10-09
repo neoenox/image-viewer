@@ -163,4 +163,66 @@ mod performance_regression_tests {
             &PathBuf::from("images/photo1999.jpg")
         );
     }
+
+    /// Deterministic pseudo-shuffle (coprime stride): no RNG dependency.
+    fn shuffled_numbered(n: usize) -> Vec<PathBuf> {
+        (0..n)
+            .map(|i| PathBuf::from(format!("img-{:05}.png", (i * 7919) % n)))
+            .collect()
+    }
+
+    fn assert_natural_order(files: &[PathBuf]) {
+        for pair in files.windows(2) {
+            let name = |p: &PathBuf| p.file_name().unwrap().to_string_lossy().into_owned();
+            assert_ne!(
+                natural_cmp(&name(&pair[0]), &name(&pair[1])),
+                Ordering::Greater,
+                "out of order: {:?} before {:?}",
+                pair[0],
+                pair[1]
+            );
+        }
+    }
+
+    #[test]
+    fn sort_tens_of_thousands_with_numeric_names() {
+        let mut files = shuffled_numbered(20_000);
+        let start = std::time::Instant::now();
+        sort_image_files(&mut files);
+        let elapsed = start.elapsed();
+        assert_natural_order(&files);
+        assert_eq!(files.len(), 20_000);
+        println!(
+            "BENCH sort 20000 files: {:.1} ms",
+            elapsed.as_secs_f64() * 1000.0
+        );
+    }
+}
+
+#[cfg(test)]
+mod bench {
+    use super::*;
+
+    fn median_ms(mut times: Vec<f64>) -> f64 {
+        times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        times[times.len() / 2]
+    }
+
+    #[test]
+    #[ignore]
+    fn sort_hundreds_of_thousands_reports_median() {
+        for n in [50_000, 200_000] {
+            let mut times = Vec::new();
+            for _ in 0..3 {
+                // Rebuild the input each round so every round sorts afresh.
+                let mut files: Vec<PathBuf> = (0..n)
+                    .map(|i| PathBuf::from(format!("img-{:06}.png", (i * 7919) % n)))
+                    .collect();
+                let start = std::time::Instant::now();
+                sort_image_files(&mut files);
+                times.push(start.elapsed().as_secs_f64() * 1000.0);
+            }
+            println!("BENCH sort {n} files: median {:.1} ms", median_ms(times));
+        }
+    }
 }
