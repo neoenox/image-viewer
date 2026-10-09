@@ -303,11 +303,11 @@ impl ViewerApp {
             }
         }
         if self.anim_due.is_some_and(|due| Instant::now() >= due) {
-            if let Some(frame) = self.animation.as_ref().and_then(|a| a.poll()) {
+            if let Some(frame) = self.animation.as_mut().and_then(|a| a.poll()) {
                 match frame {
                     Ok(frame) => {
                         self.anim_frame = frame.index;
-                        self.anim_total = frame.total.max(frame.index + 1);
+                        self.anim_total = frame.total.unwrap_or(0).max(frame.index + 1);
                         self.base = Some(std::sync::Arc::new(frame.rgba));
                         self.anim_due = Some(Instant::now() + frame.delay);
                         self.rebuild_texture(ctx);
