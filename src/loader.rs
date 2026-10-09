@@ -1,6 +1,6 @@
 use crate::imaging::{decode_image, downscale_to_cap, rotate_rgba};
 use crate::sync::{catch_panic, wait_recover, LockRecover};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -56,7 +56,7 @@ struct State {
     bytes: usize,
     result: Option<(u64, Result<CachedImage, String>)>,
     detail_result: Option<Result<DetailImage, (DetailKey, String)>>,
-    keep: Vec<PathBuf>,
+    keep: HashSet<PathBuf>,
     detail_src: Option<DetailSource>,
     stopping: bool,
 }
@@ -300,9 +300,7 @@ impl ImageLoader {
         {
             return;
         }
-        if !state.keep.contains(&key.0) {
-            state.keep.push(key.0.clone());
-        }
+        state.keep.insert(key.0.clone());
         if state.preloads.len() < 16 {
             state.preloads.push_back(key);
         }
@@ -316,7 +314,7 @@ impl ImageLoader {
     }
     pub fn prune(&self, keep: &[PathBuf], cap: usize) {
         let mut state = self.shared.0.lock_recover();
-        state.keep = keep.to_vec();
+        state.keep = keep.iter().cloned().collect();
         state.keep_cap = Some(cap);
         state
             .failed
@@ -327,7 +325,7 @@ impl ImageLoader {
         state
             .cache
             .retain(|(p, c), _| keep.contains(p) && *c == cap);
-        let keys: Vec<_> = state.cache.keys().cloned().collect();
+        let keys: HashSet<_> = state.cache.keys().cloned().collect();
         state.order.retain(|k| keys.contains(k));
         state.bytes = state.cache.values().map(|v| v.rgba.as_raw().len()).sum();
     }
