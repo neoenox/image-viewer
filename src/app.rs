@@ -393,24 +393,21 @@ impl ViewerApp {
             return;
         }
         let n = self.files.len();
-        let at = |i: usize| self.files[i % n].clone();
-        let next = at(self.index + 1);
-        let prev = at(self.index + n - 1);
-        let next2 = at(self.index + 2);
-        let prev2 = at((self.index + n - (2 % n)) % n);
         let current = self.files[self.index].clone();
-        self.loader.prune(
-            &[
-                current,
-                next.clone(),
-                prev.clone(),
-                next2.clone(),
-                prev2.clone(),
-            ],
-            self.tex_cap,
-        );
-        for p in [next, prev, next2, prev2] {
-            self.loader.request(p, self.tex_cap);
+        let mut keep = vec![current];
+        if n < 2 {
+            self.loader.prune(&keep, self.tex_cap);
+            return;
+        }
+        for offset in [1, n - 1, 2, n - 2] {
+            let path = self.files[(self.index + offset) % n].clone();
+            if !keep.contains(&path) {
+                keep.push(path);
+            }
+        }
+        self.loader.prune(&keep, self.tex_cap);
+        for path in keep.into_iter().skip(1) {
+            self.loader.request(path, self.tex_cap);
         }
     }
 
@@ -843,6 +840,7 @@ impl ViewerApp {
                 .filter_map(|f| f.path.clone())
                 .collect()
         });
+        let dropped_count = dropped.len();
         if let Some(path) = dropped.into_iter().next() {
             if path.is_dir() {
                 if let Some(first) = first_image_in_dir(&path) {
@@ -856,15 +854,29 @@ impl ViewerApp {
                 self.load_error =
                     Some("未対応の形式です（jpg/png/gif/bmp/webp/tiff等に対応）".to_owned());
             }
+            if dropped_count > 1 {
+                let notice = format!(
+                    "{}件のドロップを受け取りました。最初の1件のみ開きます。",
+                    dropped_count
+                );
+                self.load_error = Some(match self.load_error.take() {
+                    Some(error) => format!("{error} {notice}"),
+                    None => notice,
+                });
+            }
         }
     }
+}
+
+fn is_valid_launch_path(path: &Path) -> bool {
+    path.exists() && (path.is_dir() || is_supported(path))
 }
 
 pub fn run() -> eframe::Result<()> {
     let initial: Option<PathBuf> = std::env::args_os()
         .nth(1)
         .map(PathBuf::from)
-        .filter(|p| p.is_dir() || is_supported(p) || p.exists());
+        .filter(|p| is_valid_launch_path(p));
 
     let mut app = ViewerApp::new(initial);
     app.settings_path = crate::settings::ViewerSettings::default_path();
@@ -892,6 +904,22 @@ pub fn run() -> eframe::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cli_only_accepts_existing_supported_paths() {
+        let dir = std::env::temp_dir().join(format!("iv-cli-filter-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let txt = dir.join("note.txt");
+        let png = dir.join("sample.png");
+        std::fs::write(&txt, b"not an image").unwrap();
+        std::fs::write(&png, b"placeholder").unwrap();
+        assert!(is_valid_launch_path(&dir));
+        assert!(is_valid_launch_path(&png));
+        assert!(!is_valid_launch_path(&txt));
+        assert!(!is_valid_launch_path(&dir.join("missing.png")));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+
     use super::*;
 
     fn approx(a: f32, b: f32) -> bool {
