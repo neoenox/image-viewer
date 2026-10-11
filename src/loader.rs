@@ -314,20 +314,22 @@ impl ImageLoader {
     }
     pub fn prune(&self, keep: &[PathBuf], cap: usize) {
         let mut state = self.shared.0.lock_recover();
-        state.keep = keep.iter().cloned().collect();
+        // 照合はHashSetで1回だけ固め、3つのretainを線形にする。
+        let keep_set: HashSet<PathBuf> = keep.iter().cloned().collect();
         state.keep_cap = Some(cap);
         state
             .failed
-            .retain(|(p, c), _| keep.contains(p) && *c == cap);
+            .retain(|(p, c), _| keep_set.contains(p) && *c == cap);
         state
             .preloads
-            .retain(|(p, c)| keep.contains(p) && *c == cap);
+            .retain(|(p, c)| keep_set.contains(p) && *c == cap);
         state
             .cache
-            .retain(|(p, c), _| keep.contains(p) && *c == cap);
+            .retain(|(p, c), _| keep_set.contains(p) && *c == cap);
         let keys: HashSet<_> = state.cache.keys().cloned().collect();
         state.order.retain(|k| keys.contains(k));
         state.bytes = state.cache.values().map(|v| v.rgba.as_raw().len()).sum();
+        state.keep = keep_set;
     }
 }
 impl Drop for ImageLoader {
@@ -554,6 +556,81 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn prune_large_keep_set_filters_all_queues() {
+        // 8x8 tiles keep the fixture small (8000 entries ~ 2 MiB, well under
+        // the byte budget) so this measures the set logic, not decoding.
+        // Workers are parked first: otherwise they could pop queued preloads
+        // mid-test and the counts would race.
+        let loader = ImageLoader::new();
+        loader.shared.0.lock_recover().stopping = true;
+        let key = |i: usize| (PathBuf::from(format!("thumb-{i:05}.png")), 128);
+        {
+            let mut state = loader.shared.0.lock_recover();
+            for i in 0..8000 {
+                let image = CachedImage {
+                    rgba: Arc::new(image::RgbaImage::new(8, 8)),
+                    orig: (8, 8),
+                    gif: false,
+                };
+                state.bytes += image.rgba.as_raw().len();
+                state.order.push_back(key(i));
+                state.cache.insert(key(i), image);
+                // Preloads span kept and evicted entries; failures too, so the
+                // test proves filtering instead of passing vacuously.
+                state.preloads.push_back(key(i));
+                if i % 16 < 2 {
+                    state.failed.insert(key(i), Instant::now());
+                }
+            }
+        }
+        let keep: Vec<PathBuf> = (0..8000)
+            .step_by(2)
+            .map(|i| PathBuf::from(format!("thumb-{i:05}.png")))
+            .collect();
+        let start = std::time::Instant::now();
+        loader.prune(&keep, 128);
+        let elapsed = start.elapsed();
+        {
+            let state = loader.shared.0.lock_recover();
+            assert_eq!(state.cache.len(), 4000);
+            assert!(state.cache.contains_key(&key(0)));
+            assert!(state.cache.contains_key(&key(7998)));
+            assert!(!state.cache.contains_key(&key(1)));
+            assert!(!state.cache.contains_key(&key(7999)));
+            assert_eq!(state.preloads.len(), 4000);
+            assert!(state.preloads.iter().all(|(p, _)| {
+                let stem = p.file_stem().unwrap().to_string_lossy();
+                let n: usize = stem.strip_prefix("thumb-").unwrap().parse().unwrap();
+                n.is_multiple_of(2)
+            }));
+            // i % 16 < 2 failed: even indices kept, odd evicted.
+            assert_eq!(state.failed.len(), 500);
+            assert!(state.failed.contains_key(&key(0)));
+            assert!(!state.failed.contains_key(&key(1)));
+            // prune postconditions beyond the three filtered queues.
+            assert_eq!(state.order.len(), 4000);
+            assert!(state.order.contains(&key(0)));
+            assert!(!state.order.contains(&key(1)));
+            assert!(state.order.iter().all(|k| state.cache.contains_key(k)));
+            assert_eq!(state.bytes, 4000 * 8 * 8 * 4);
+            assert_eq!(state.keep.len(), 4000);
+            assert!(state.keep.contains(&key(0).0));
+            assert!(state.keep.contains(&key(7998).0));
+            assert!(!state.keep.contains(&key(1).0));
+            assert_eq!(state.keep_cap, Some(128));
+        }
+        // Generous bound (debug measured ~45ms): trips on quadratic
+        // regressions, not on normal CI jitter.
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "prune 8000/4000 took {elapsed:?}"
+        );
+        println!(
+            "BENCH prune 8000 cached / 4000 kept: {:.1} ms",
+            elapsed.as_secs_f64() * 1000.0
+        );
     }
 }
 #[cfg(test)]
@@ -914,5 +991,48 @@ mod bench {
             fmt(&gif_first)
         );
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    #[ignore]
+    fn prune_many_entries_reports_median() {
+        // 8x8 tiles: 50000 entries ~ 13 MiB, well under the byte budget, so
+        // this measures the keep-set logic rather than budget eviction.
+        for &(cached, kept) in &[(20_000usize, 10_000usize), (50_000, 25_000)] {
+            let mut times = Vec::new();
+            for _ in 0..3 {
+                let loader = ImageLoader::new();
+                loader.shared.0.lock_recover().stopping = true;
+                {
+                    let mut state = loader.shared.0.lock_recover();
+                    for i in 0..cached {
+                        let image = CachedImage {
+                            rgba: Arc::new(image::RgbaImage::new(8, 8)),
+                            orig: (8, 8),
+                            gif: false,
+                        };
+                        state.bytes += image.rgba.as_raw().len();
+                        state
+                            .order
+                            .push_back((PathBuf::from(format!("thumb-{i:06}.png")), 128));
+                        state
+                            .cache
+                            .insert((PathBuf::from(format!("thumb-{i:06}.png")), 128), image);
+                    }
+                }
+                let keep: Vec<PathBuf> = (0..cached)
+                    .step_by(cached / kept)
+                    .map(|i| PathBuf::from(format!("thumb-{i:06}.png")))
+                    .collect();
+                let start = Instant::now();
+                loader.prune(&keep, 128);
+                times.push(start.elapsed().as_secs_f64() * 1000.0);
+                assert_eq!(loader.shared.0.lock_recover().cache.len(), kept);
+            }
+            println!(
+                "BENCH prune {cached} cached / {kept} kept: median {:.1} ms",
+                median(times)
+            );
+        }
     }
 }
