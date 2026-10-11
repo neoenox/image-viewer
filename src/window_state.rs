@@ -104,7 +104,9 @@ impl ViewerApp {
     /// 最大化・全画面中はモニター形状を報告するだけで、通常ウィンドウとして
     /// 復元したい値ではないため、最大化フラグのみ保持して形状は温存する。
     pub(crate) fn update_window_state(&mut self, snapshot: WindowSnapshot) {
-        use crate::settings::{MAX_WINDOW_POS, MAX_WINDOW_SIZE, MIN_WINDOW_POS, MIN_WINDOW_SIZE};
+        use crate::settings::{
+            MAX_WINDOW_POS, MAX_WINDOW_SIZE, MIN_WINDOW_HEIGHT, MIN_WINDOW_POS, MIN_WINDOW_SIZE,
+        };
         if self.fullscreen || snapshot.fullscreen == Some(true) {
             return;
         }
@@ -115,12 +117,12 @@ impl ViewerApp {
         let Some(rect) = snapshot.inner else {
             return;
         };
-        // 不正値は範囲検査で弾く。
+        // 不正値は範囲検査で弾く。高さの下限は強制最小 (640x480) に合わせる。
         let (w, h) = (rect.width(), rect.height());
         if w.is_finite()
             && h.is_finite()
             && (MIN_WINDOW_SIZE..=MAX_WINDOW_SIZE).contains(&(w.round() as u32))
-            && (MIN_WINDOW_SIZE..=MAX_WINDOW_SIZE).contains(&(h.round() as u32))
+            && (MIN_WINDOW_HEIGHT..=MAX_WINDOW_SIZE).contains(&(h.round() as u32))
         {
             self.settings.window_width = w.round() as u32;
             self.settings.window_height = h.round() as u32;
@@ -263,6 +265,16 @@ mod tests {
                 crate::settings::DEFAULT_WINDOW_WIDTH,
                 crate::settings::DEFAULT_WINDOW_HEIGHT
             )
+        );
+        // 最小サイズ (640x480) の高さも追跡される。
+        track_frame(
+            &mut app,
+            &ctx,
+            window_info([50.0, 60.0], [640.0, 480.0], false, false),
+        );
+        assert_eq!(
+            (app.settings.window_width, app.settings.window_height),
+            (640, 480)
         );
         // 通常に戻すとフラグが降り、サイズ・位置が更新される。
         track_frame(

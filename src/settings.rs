@@ -6,8 +6,10 @@ pub const DEFAULT_WINDOW_WIDTH: u32 = 1100;
 pub const DEFAULT_WINDOW_HEIGHT: u32 = 750;
 /// Saved window sizes outside this range are rejected (a hand-edited or stale
 /// file must never produce an unusable window); the defaults are used instead.
-/// The lower bound matches the enforced window minimum (640x480).
+/// The lower bounds match the enforced window minimum (640x480): width and
+/// height have separate floors so a minimum-size window still restores.
 pub const MIN_WINDOW_SIZE: u32 = 640;
+pub const MIN_WINDOW_HEIGHT: u32 = 480;
 pub const MAX_WINDOW_SIZE: u32 = 7680;
 /// Saved window positions outside this range are rejected (a hand-edited file
 /// must never open the window far off-screen); the window is centered instead.
@@ -107,7 +109,12 @@ impl ViewerSettings {
             }
             if key == "window_width" || key == "window_height" {
                 if let Ok(size) = value.parse::<u32>() {
-                    if (MIN_WINDOW_SIZE..=MAX_WINDOW_SIZE).contains(&size) {
+                    let range = if key == "window_width" {
+                        MIN_WINDOW_SIZE..=MAX_WINDOW_SIZE
+                    } else {
+                        MIN_WINDOW_HEIGHT..=MAX_WINDOW_SIZE
+                    };
+                    if range.contains(&size) {
                         if key == "window_width" {
                             settings.window_width = size;
                         } else {
@@ -234,6 +241,10 @@ mod tests {
         std::fs::write(&path, "window_width=1280\nwindow_height=800\n").unwrap();
         let loaded = ViewerSettings::load(&path);
         assert_eq!((loaded.window_width, loaded.window_height), (1280, 800));
+        // Heights down to the enforced window minimum (480) are kept.
+        std::fs::write(&path, "window_width=640\nwindow_height=500\n").unwrap();
+        let loaded = ViewerSettings::load(&path);
+        assert_eq!((loaded.window_width, loaded.window_height), (640, 500));
         std::fs::write(
             &path,
             "window_width=abc\nwindow_height=0\nwindow_width=99999\nwindow_height=800\n",
