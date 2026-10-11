@@ -116,10 +116,24 @@ impl ViewerSettings {
         let sequence = SAVE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let temp = path.with_file_name(format!("{name}.tmp.{}.{}", std::process::id(), sequence));
         let result = (|| -> std::io::Result<()> {
-            let mut file = std::fs::OpenOptions::new()
+            // `create_new` guards against clobbering another writer, but a
+            // stale temp file (crash litter, then PID reuse) must not fail
+            // the save: a live process can never share our pid+suffixed name,
+            // so a pre-existing file is dead litter and safe to replace.
+            let mut file = match std::fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
-                .open(&temp)?;
+                .open(&temp)
+            {
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    std::fs::remove_file(&temp).ok();
+                    std::fs::OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .open(&temp)?
+                }
+                opened => opened?,
+            };
             file.write_all(text.as_bytes())?;
             file.sync_all()?;
             drop(file);
@@ -181,5 +195,40 @@ mod tests {
         std::fs::write(&path, "zoom_quality=sharp\n").unwrap();
         assert_eq!(ViewerSettings::load(&path).zoom_quality, ZoomQuality::Sharp);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn save_heals_stale_temp_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "viewer-settings-stale-{}-{}",
+            std::process::id(),
+            SAVE_SEQUENCE.load(Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.txt");
+        // Plant crash litter for the upcoming sequence values: SAVE_SEQUENCE
+        // is process-global, so cover a window against concurrent tests
+        // (each in its own directory, never touching these files).
+        let seq = SAVE_SEQUENCE.load(Ordering::Relaxed);
+        for s in seq..seq + 64 {
+            std::fs::write(
+                dir.join(format!("settings.txt.tmp.{}.{s}", std::process::id())),
+                b"stale",
+            )
+            .unwrap();
+        }
+        // The save must succeed despite the litter, using a healed temp file.
+        ViewerSettings::default().save(&path).unwrap();
+        assert!(std::fs::read_to_string(&path)
+            .unwrap()
+            .starts_with("version=1\n"));
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp."))
+            .collect();
+        // Exactly the consumed temp file is gone; the untouched spares remain.
+        assert_eq!(leftovers.len(), 63, "leftovers: {leftovers:?}");
+        std::fs::remove_dir_all(dir).ok();
     }
 }
