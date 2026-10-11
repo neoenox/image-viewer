@@ -32,6 +32,17 @@ impl ZoomQuality {
     }
 }
 
+/// Keys understood by `load` below. Anything else is carried verbatim (see
+/// `unknown`) so a save never drops fields written by a newer release.
+const KNOWN_KEYS: &[&str] = &[
+    "version",
+    "wheel_navigation",
+    "hold_to_peek",
+    "hover_pan",
+    "auto_hide_toolbar",
+    "zoom_quality",
+];
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ViewerSettings {
     pub wheel_navigation: bool,
@@ -39,6 +50,9 @@ pub struct ViewerSettings {
     pub hover_pan: bool,
     pub auto_hide_toolbar: bool,
     pub zoom_quality: ZoomQuality,
+    /// `key=value` lines from a newer release, kept verbatim and re-emitted
+    /// on save. `version` is excluded (always emitted as the header).
+    pub unknown: Vec<(String, String)>,
 }
 impl Default for ViewerSettings {
     fn default() -> Self {
@@ -48,6 +62,7 @@ impl Default for ViewerSettings {
             hover_pan: true,
             auto_hide_toolbar: true,
             zoom_quality: ZoomQuality::High,
+            unknown: Vec::new(),
         }
     }
 }
@@ -70,6 +85,13 @@ impl ViewerSettings {
                 continue;
             };
             let (key, value) = (key.trim(), value.trim());
+            if key.is_empty() {
+                continue;
+            }
+            if !KNOWN_KEYS.contains(&key) {
+                settings.unknown.push((key.to_owned(), value.to_owned()));
+                continue;
+            }
             if key == "zoom_quality" {
                 if let Some(quality) = ZoomQuality::parse(value) {
                     settings.zoom_quality = quality;
@@ -95,7 +117,7 @@ impl ViewerSettings {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        let text = format!(
+        let mut text = format!(
             "version=1\nwheel_navigation={}\nhold_to_peek={}\nhover_pan={}\nauto_hide_toolbar={}\nzoom_quality={}\n",
             self.wheel_navigation,
             self.hold_to_peek,
@@ -103,6 +125,11 @@ impl ViewerSettings {
             self.auto_hide_toolbar,
             self.zoom_quality.as_str()
         );
+        // Future fields carried verbatim (see `unknown`): re-emit last so a
+        // reload parses them back identically.
+        for (key, value) in &self.unknown {
+            text.push_str(&format!("{key}={value}\n"));
+        }
         // Stage in the same directory and rename; never truncate the live file.
         let name = path
             .file_name()
@@ -166,6 +193,7 @@ mod tests {
             hover_pan: false,
             auto_hide_toolbar: false,
             zoom_quality: ZoomQuality::Standard,
+            unknown: Vec::new(),
         };
         changed.save(&path).unwrap();
         assert_eq!(ViewerSettings::load(&path), changed);
@@ -173,8 +201,11 @@ mod tests {
             .unwrap()
             .starts_with("version=1\n"));
         // A second save creates a recovery copy before the replacement.
+        // Recovery is manual (copy the .bak back); the guarantee locked here
+        // is that the .bak holds the exact pre-save settings.
         ViewerSettings::default().save(&path).unwrap();
         assert!(path.with_extension("bak").is_file());
+        assert_eq!(ViewerSettings::load(&path.with_extension("bak")), changed);
         assert_eq!(ViewerSettings::load(&path), ViewerSettings::default());
         changed.save(&path).unwrap();
         // Unknown keys and bad values are ignored; known good lines still apply.
@@ -195,6 +226,51 @@ mod tests {
         std::fs::write(&path, "zoom_quality=sharp\n").unwrap();
         assert_eq!(ViewerSettings::load(&path).zoom_quality, ZoomQuality::Sharp);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn unknown_future_keys_survive_load_save_round_trip() {
+        let dir = std::env::temp_dir().join(format!(
+            "viewer-settings-future-{}-{}",
+            std::process::id(),
+            SAVE_SEQUENCE.load(Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.txt");
+        // Fields from a newer release (e.g. #63's window_*): understood by
+        // neither load nor save as settings, yet never dropped either.
+        std::fs::write(
+            &path,
+            "version=1\nwindow_width=1280\nwindow_height=800\nrestore_window=true\n",
+        )
+        .unwrap();
+        let loaded = ViewerSettings::load(&path);
+        // Known fields stay at their defaults; only `unknown` differs.
+        assert_eq!(
+            ViewerSettings {
+                unknown: Vec::new(),
+                ..loaded.clone()
+            },
+            ViewerSettings::default()
+        );
+        assert_eq!(
+            loaded.unknown,
+            [
+                ("window_width".to_owned(), "1280".to_owned()),
+                ("window_height".to_owned(), "800".to_owned()),
+                ("restore_window".to_owned(), "true".to_owned()),
+            ]
+        );
+        loaded.save(&path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("window_width=1280\n"), "{text}");
+        assert!(text.contains("window_height=800\n"), "{text}");
+        assert!(text.contains("restore_window=true\n"), "{text}");
+        // The schema marker is emitted exactly once, never duplicated.
+        assert_eq!(text.matches("version=1\n").count(), 1, "{text}");
+        // And a reload parses back identically (no duplication drift).
+        assert_eq!(ViewerSettings::load(&path).unknown, loaded.unknown);
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
