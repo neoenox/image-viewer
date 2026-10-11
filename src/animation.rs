@@ -1,4 +1,5 @@
 use crate::imaging::{downscale_to_cap, DECODE_BUDGET};
+use crate::sync::catch_panic;
 use image::{AnimationDecoder, ImageDecoder};
 use std::path::PathBuf;
 use std::sync::{
@@ -40,7 +41,12 @@ impl Animation {
             .name("gif-stream".into())
             .spawn(move || {
                 let mut total = None;
-                let result = (|| -> Result<(), String> {
+                // A codec panic must surface as a sticky stream error (same
+                // contract as the image loader). Without this, a panicking
+                // decoder would kill the worker thread and leave playback
+                // hanging on "pending" forever: the disconnected channel
+                // reads as None, never as Err.
+                let result = catch_panic(|| -> Result<(), String> {
                     loop {
                         if stop.load(Ordering::Relaxed) {
                             return Ok(());
@@ -92,7 +98,7 @@ impl Animation {
                         }
                         total = Some(count);
                     }
-                })();
+                });
                 if let Err(error) = result {
                     send(&tx, &stop, Err(error));
                 }
@@ -195,6 +201,120 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         panic!("GIF worker did not release file after cancellation");
+    }
+
+    #[test]
+    fn partial_frame_is_composited_onto_full_canvas() {
+        use image::codecs::gif::{GifEncoder, Repeat};
+        let path = std::env::temp_dir().join(format!("viewer-partial-{}.gif", std::process::id()));
+        {
+            let mut encoder = GifEncoder::new(std::fs::File::create(&path).unwrap());
+            encoder.set_repeat(Repeat::Infinite).unwrap();
+            // Full-canvas red base frame.
+            encoder
+                .encode_frame(image::Frame::from_parts(
+                    image::RgbaImage::from_pixel(4, 3, image::Rgba([255, 0, 0, 255])),
+                    0,
+                    0,
+                    image::Delay::from_numer_denom_ms(20, 1),
+                ))
+                .unwrap();
+            // Smaller blue patch: the decoder must composite it onto the
+            // canvas, not hand through a 2x2 image. (The encoder drops the
+            // offset, so the patch lands at the top-left; the point here is
+            // the full-canvas composite our pipeline serves.)
+            encoder
+                .encode_frame(image::Frame::from_parts(
+                    image::RgbaImage::from_pixel(2, 2, image::Rgba([0, 0, 255, 255])),
+                    1,
+                    0,
+                    image::Delay::from_numer_denom_ms(20, 1),
+                ))
+                .unwrap();
+        }
+        let mut stream = Animation::new(path.clone(), 2048);
+        let start = std::time::Instant::now();
+        // Skip the base frame; the next frame is the composited patch.
+        let mut seen = 0;
+        loop {
+            if let Some(frame) = stream.poll() {
+                let frame = frame.unwrap();
+                if seen == 1 {
+                    assert_eq!(frame.rgba.dimensions(), (4, 3));
+                    assert_eq!(frame.rgba.get_pixel(0, 0).0, [0, 0, 255, 255]);
+                    assert_eq!(frame.rgba.get_pixel(1, 1).0, [0, 0, 255, 255]);
+                    // Outside the patch: previous frame was disposed.
+                    assert_eq!(frame.rgba.get_pixel(2, 0).0, [0, 0, 0, 0]);
+                    assert_eq!(frame.rgba.get_pixel(0, 2).0, [0, 0, 0, 0]);
+                    break;
+                }
+                seen += 1;
+            }
+            assert!(start.elapsed() < Duration::from_secs(10));
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        drop(stream);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn mid_stream_failure_becomes_sticky_error() {
+        use image::codecs::gif::{GifEncoder, Repeat};
+        let path = std::env::temp_dir().join(format!("viewer-swap-{}.gif", std::process::id()));
+        {
+            let mut encoder = GifEncoder::new(std::fs::File::create(&path).unwrap());
+            encoder.set_repeat(Repeat::Infinite).unwrap();
+            encoder
+                .encode_frame(image::Frame::from_parts(
+                    image::RgbaImage::from_pixel(4, 3, image::Rgba([1, 2, 3, 255])),
+                    0,
+                    0,
+                    image::Delay::from_numer_denom_ms(20, 1),
+                ))
+                .unwrap();
+        }
+        let mut stream = Animation::new(path.clone(), 2048);
+        let start = std::time::Instant::now();
+        // Wait until the first loop completes (total known): the worker is
+        // mid-playback, then the file turns to garbage under it.
+        loop {
+            if let Some(frame) = stream.poll() {
+                if frame.unwrap().total.is_some() {
+                    break;
+                }
+            }
+            assert!(start.elapsed() < Duration::from_secs(10));
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        std::fs::write(&path, b"definitely not a gif").unwrap();
+        // The next pass fails to open and the error sticks; playback never
+        // busy-retries behind the UI's back.
+        let mut polls = 0;
+        loop {
+            match stream.poll() {
+                // Draining frames decoded before the swap is fine.
+                Some(Ok(_)) => {}
+                Some(Err(_)) => break,
+                None => {
+                    assert!(start.elapsed() < Duration::from_secs(10));
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+            }
+            polls += 1;
+            assert!(polls < 100_000, "worker kept quiet after the file broke");
+        }
+        assert!(matches!(stream.poll(), Some(Err(_))));
+        drop(stream);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn worker_panic_surfaces_as_sticky_error() {
+        // Documents the wiring used by the stream worker: a codec panic
+        // becomes the sticky Err the UI shows, instead of a silent hang on a
+        // dead worker thread (same contract as the image loader).
+        let result: Result<(), String> = catch_panic(|| panic!("codec bug"));
+        assert_eq!(result, Err("decoder panicked".to_owned()));
     }
 
     #[test]
