@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
 pub const SUPPORTED_EXTS: &[&str] = &[
     "jpg", "jpeg", "png", "gif", "bmp", "webp", "tif", "tiff", "ico", "dds", "hdr", "exr", "qoi",
@@ -25,22 +26,20 @@ pub fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
             (Some(x), Some(y)) => {
                 if x.is_ascii_digit() && y.is_ascii_digit() {
                     // 数字ブロックを切り出して数値比較
-                    let mut na = String::new();
-                    while let Some(&(_, d)) = ia.peek() {
-                        if !d.is_ascii_digit() {
-                            break;
-                        }
-                        na.push(d);
+                    // char_indices gives UTF-8 boundaries. Compare borrowed
+                    // digit slices instead of allocating Strings per comparison.
+                    let start_a = ia.peek().map(|&(idx, _)| idx).unwrap();
+                    while ia.peek().is_some_and(|&(_, d)| d.is_ascii_digit()) {
                         ia.next();
                     }
-                    let mut nb = String::new();
-                    while let Some(&(_, d)) = ib.peek() {
-                        if !d.is_ascii_digit() {
-                            break;
-                        }
-                        nb.push(d);
+                    let end_a = ia.peek().map(|&(idx, _)| idx).unwrap_or(a.len());
+                    let na = &a[start_a..end_a];
+                    let start_b = ib.peek().map(|&(idx, _)| idx).unwrap();
+                    while ib.peek().is_some_and(|&(_, d)| d.is_ascii_digit()) {
                         ib.next();
                     }
+                    let end_b = ib.peek().map(|&(idx, _)| idx).unwrap_or(b.len());
+                    let nb = &b[start_b..end_b];
                     let ta = na.trim_start_matches('0');
                     let tb = nb.trim_start_matches('0');
                     // まず有効桁数（=数値の大きさ）で比較
@@ -49,7 +48,7 @@ pub fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
                         return ord;
                     }
                     // 数値が等しい場合は元の文字列順（"001" < "01" < "1"）
-                    let ord = na.cmp(&nb);
+                    let ord = na.cmp(nb);
                     if ord != std::cmp::Ordering::Equal {
                         return ord;
                     }
@@ -66,18 +65,33 @@ pub fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
     }
 }
 
+/// Each filename is converted to UTF-8 once per sort, not on every compare.
+#[derive(Eq, PartialEq)]
+struct NaturalSortKey {
+    filename: String,
+    path: PathBuf,
+}
+
+impl Ord for NaturalSortKey {
+    fn cmp(&self, other: &Self) -> Ordering {
+        natural_cmp(&self.filename, &other.filename).then_with(|| self.path.cmp(&other.path))
+    }
+}
+
+impl PartialOrd for NaturalSortKey {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 /// 画像ファイル一覧を自然順（連番対応）でソートする。
 pub(crate) fn sort_image_files(files: &mut [PathBuf]) {
-    files.sort_by(|a, b| {
-        let na = a
+    files.sort_by_cached_key(|path| NaturalSortKey {
+        filename: path
             .file_name()
-            .map(|s| s.to_string_lossy())
-            .unwrap_or_default();
-        let nb = b
-            .file_name()
-            .map(|s| s.to_string_lossy())
-            .unwrap_or_default();
-        natural_cmp(&na, &nb).then_with(|| a.cmp(b))
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        path: path.clone(),
     });
 }
 
@@ -113,4 +127,105 @@ pub fn first_image_in_dir(dir: &Path) -> Option<PathBuf> {
         .collect();
     sort_image_files(&mut files);
     files.into_iter().next()
+}
+
+#[cfg(test)]
+mod performance_regression_tests {
+    use super::*;
+
+    #[test]
+    fn natural_sort_keeps_number_semantics_and_unicode_paths() {
+        let mut files = vec![
+            PathBuf::from("画像/10.png"),
+            PathBuf::from("画像/1.png"),
+            PathBuf::from("画像/01.png"),
+            PathBuf::from("画像/2.png"),
+            PathBuf::from("画像/001.png"),
+        ];
+        sort_image_files(&mut files);
+        let names: Vec<_> = files
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["001.png", "01.png", "1.png", "2.png", "10.png"]);
+    }
+
+    #[test]
+    fn sort_large_numbered_directory_without_changing_order() {
+        let mut files: Vec<_> = (0..2000)
+            .rev()
+            .map(|n| PathBuf::from(format!("images/photo{n}.jpg")))
+            .collect();
+        sort_image_files(&mut files);
+        assert_eq!(files.first().unwrap(), &PathBuf::from("images/photo0.jpg"));
+        assert_eq!(
+            files.last().unwrap(),
+            &PathBuf::from("images/photo1999.jpg")
+        );
+    }
+
+    /// Deterministic pseudo-shuffle (coprime stride): no RNG dependency.
+    /// 7919 is prime; `n` must not be a multiple of it or the output duplicates.
+    fn shuffled_numbered(n: usize) -> Vec<PathBuf> {
+        debug_assert!(!n.is_multiple_of(7919), "stride shares a factor with n");
+        // Non-padded names so the numeric digit-block path in natural_cmp runs
+        // (zero-padded names would reduce to plain lexicographic order).
+        (0..n)
+            .map(|i| PathBuf::from(format!("img-{}.png", (i * 7919) % n)))
+            .collect()
+    }
+
+    #[test]
+    fn sort_tens_of_thousands_with_numeric_names() {
+        let mut files = shuffled_numbered(20_000);
+        let start = std::time::Instant::now();
+        sort_image_files(&mut files);
+        let elapsed = start.elapsed();
+        // Exact expected order: proves ordering and permutation completeness
+        // (no loss/duplicates) in one assertion.
+        let expected: Vec<PathBuf> = (0..20_000)
+            .map(|i| PathBuf::from(format!("img-{i}.png")))
+            .collect();
+        assert_eq!(files, expected);
+        // Generous bound (debug measured ~0.3s): trips on algorithmic
+        // regressions, not on normal CI jitter.
+        assert!(
+            elapsed < std::time::Duration::from_secs(10),
+            "sort 20000 took {elapsed:?}"
+        );
+        println!(
+            "BENCH sort 20000 files: {:.1} ms",
+            elapsed.as_secs_f64() * 1000.0
+        );
+    }
+}
+
+#[cfg(test)]
+mod bench {
+    use super::*;
+
+    fn median(mut times: Vec<f64>) -> f64 {
+        times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        times[times.len() / 2]
+    }
+
+    #[test]
+    #[ignore]
+    fn sort_hundreds_of_thousands_reports_median() {
+        for n in [50_000usize, 200_000] {
+            debug_assert!(!n.is_multiple_of(7919), "stride shares a factor with n");
+            let mut times = Vec::new();
+            for _ in 0..3 {
+                // Rebuild the input each round so every round sorts afresh.
+                // Non-padded names so the numeric path runs, as in the fast test.
+                let mut files: Vec<PathBuf> = (0..n)
+                    .map(|i| PathBuf::from(format!("img-{}.png", (i * 7919) % n)))
+                    .collect();
+                let start = std::time::Instant::now();
+                sort_image_files(&mut files);
+                times.push(start.elapsed().as_secs_f64() * 1000.0);
+            }
+            println!("BENCH sort {n} files: median {:.1} ms", median(times));
+        }
+    }
 }
