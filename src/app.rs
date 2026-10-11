@@ -18,6 +18,11 @@ pub(crate) const ICON_ASSOC: char = '\u{1F517}';
 /// 中ボタンを押している間の拡大率（押した時点の表示倍率に対する倍数）。
 pub const PEEK_MAGNIFICATION: f32 = 2.0;
 
+/// 手動ズームの範囲。fit倍率もこの中に収まるため、fit→手動への
+/// 移行で倍率が跳ばない。下限は巨大画像のfit、上限は等倍観察用。
+pub const ZOOM_MIN: f32 = 0.01;
+pub const ZOOM_MAX: f32 = 32.0;
+
 /// ツールバーで使う全アイコン。tofu防止の回帰テスト用。
 pub const TOOLBAR_ICONS: &[char] = &[
     ICON_OPEN, ICON_PREV, ICON_NEXT, ICON_FIT, ICON_ROT_L, ICON_ROT_R, ICON_PLAY, ICON_STOP,
@@ -28,6 +33,10 @@ pub const TOOLBAR_ICONS: &[char] = &[
 /// ones are re-rotated per upscale request. Bounds the rotation double-hold
 /// well below the decode budget while keeping normal images jank-free.
 pub(crate) const ORIENTED_CACHE_MAX_BYTES: usize = 64 * 1024 * 1024;
+
+/// 可視行を超えて保持するサムネイル上限（LRU）。128pxタイルは約64KiB/枚の
+/// ため数MiBで収まり、数画面分のスクロールバックを再デコードなしで返す。
+pub(crate) const THUMB_KEEP_MAX: usize = 64;
 
 pub fn setup_jp_font(ctx: &egui::Context) {
     let candidates = [
@@ -129,6 +138,10 @@ pub struct ViewerApp {
     pub(crate) toolbar_pinned: bool,
     pub(crate) thumbnails: std::collections::HashMap<PathBuf, egui::TextureHandle>,
     pub(crate) thumbnail_loader: ImageLoader,
+    /// Recently visible thumbnails, most-recent last; retention is decoupled
+    /// from visibility so scrolling back does not re-decode.
+    pub(crate) thumb_lru: std::collections::VecDeque<PathBuf>,
+    pub(crate) thumb_retained: std::collections::HashSet<PathBuf>,
     pub(crate) show_assoc: bool,
     pub(crate) assoc_status: Vec<(String, bool)>,
 }
@@ -191,6 +204,8 @@ impl ViewerApp {
             toolbar_pinned: false,
             thumbnails: std::collections::HashMap::new(),
             thumbnail_loader: ImageLoader::for_thumbnails(),
+            thumb_lru: std::collections::VecDeque::new(),
+            thumb_retained: std::collections::HashSet::new(),
             show_assoc: false,
             assoc_status: Vec::new(),
         };
@@ -249,6 +264,10 @@ impl ViewerApp {
         self.rotation = 0;
         self.fit = true;
         self.zoom = 1.0;
+        // 別フォルダの一覧になったため、サムネイルの保持世代を捨てる
+        // （次フレームの可視分から作り直す。古いパスは触れない）。
+        self.thumb_lru.clear();
+        self.thumb_retained.clear();
         self.load_current(ctx);
     }
 
@@ -482,7 +501,7 @@ impl ViewerApp {
     /// 現在の表示倍率。fit中は領域に合わせた倍率を返す。
     pub fn current_scale(&self, avail: egui::Vec2, iw: f32, ih: f32) -> f32 {
         if self.fit {
-            (avail.x / iw).min(avail.y / ih).clamp(0.01, 8.0)
+            (avail.x / iw).min(avail.y / ih).clamp(ZOOM_MIN, 8.0)
         } else {
             self.zoom
         }
@@ -518,7 +537,7 @@ impl ViewerApp {
         iw: f32,
         ih: f32,
     ) {
-        let new_scale = (old_scale * factor).clamp(0.05, 32.0);
+        let new_scale = (old_scale * factor).clamp(ZOOM_MIN, ZOOM_MAX);
         if new_scale == old_scale {
             return;
         }
@@ -534,7 +553,7 @@ impl ViewerApp {
     /// 画面中央基準のズーム（ツールバー・キー用）。パンは変えない。
     pub fn zoom_centered(&mut self, factor: f32) {
         let old = self.current_scale(self.view_avail, self.view_img.x, self.view_img.y);
-        let new = (old * factor).clamp(0.05, 32.0);
+        let new = (old * factor).clamp(ZOOM_MIN, ZOOM_MAX);
         if new == old {
             return;
         }
@@ -570,7 +589,7 @@ impl ViewerApp {
             return false;
         }
         let scale = self.current_scale(avail, iw, ih);
-        let target = (scale * PEEK_MAGNIFICATION).clamp(0.05, 32.0);
+        let target = (scale * PEEK_MAGNIFICATION).clamp(ZOOM_MIN, ZOOM_MAX);
         if target <= scale {
             return false;
         }
@@ -1095,7 +1114,40 @@ mod tests {
             100.0,
             100.0,
         );
-        assert!(approx(app.zoom_level(), 0.05));
+        assert!(approx(app.zoom_level(), 0.01));
+    }
+
+    #[test]
+    pub(crate) fn fit_to_manual_zoom_has_no_jump() {
+        // fit倍率が手動範囲内にあるため、移行初手でクランプに跳ばない。
+        let mut app = ViewerApp::new(None);
+        app.fit = false;
+        app.zoom = 1.0;
+        app.pan_offset = egui::Vec2::ZERO;
+        let avail = egui::vec2(1000.0, 700.0);
+        // 巨大画像のfit相当（旧下限0.05未満）から +25%: 0.025 のまま。
+        app.zoom_at(
+            1.25,
+            egui::pos2(500.0, 350.0),
+            egui::pos2(500.0, 350.0),
+            0.02,
+            avail,
+            2000.0,
+            1400.0,
+        );
+        assert!(!app.is_fit());
+        assert!(approx(app.zoom_level(), 0.025));
+        // 小画像のfit相当（8.0）から -20%: 6.4 のまま。
+        app.zoom_at(
+            1.0 / 1.25,
+            egui::pos2(500.0, 350.0),
+            egui::pos2(500.0, 350.0),
+            8.0,
+            avail,
+            100.0,
+            100.0,
+        );
+        assert!(approx(app.zoom_level(), 6.4));
     }
 
     #[test]

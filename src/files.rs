@@ -163,4 +163,69 @@ mod performance_regression_tests {
             &PathBuf::from("images/photo1999.jpg")
         );
     }
+
+    /// Deterministic pseudo-shuffle (coprime stride): no RNG dependency.
+    /// 7919 is prime; `n` must not be a multiple of it or the output duplicates.
+    fn shuffled_numbered(n: usize) -> Vec<PathBuf> {
+        debug_assert!(!n.is_multiple_of(7919), "stride shares a factor with n");
+        // Non-padded names so the numeric digit-block path in natural_cmp runs
+        // (zero-padded names would reduce to plain lexicographic order).
+        (0..n)
+            .map(|i| PathBuf::from(format!("img-{}.png", (i * 7919) % n)))
+            .collect()
+    }
+
+    #[test]
+    fn sort_tens_of_thousands_with_numeric_names() {
+        let mut files = shuffled_numbered(20_000);
+        let start = std::time::Instant::now();
+        sort_image_files(&mut files);
+        let elapsed = start.elapsed();
+        // Exact expected order: proves ordering and permutation completeness
+        // (no loss/duplicates) in one assertion.
+        let expected: Vec<PathBuf> = (0..20_000)
+            .map(|i| PathBuf::from(format!("img-{i}.png")))
+            .collect();
+        assert_eq!(files, expected);
+        // Generous bound (debug measured ~0.3s): trips on algorithmic
+        // regressions, not on normal CI jitter.
+        assert!(
+            elapsed < std::time::Duration::from_secs(10),
+            "sort 20000 took {elapsed:?}"
+        );
+        println!(
+            "BENCH sort 20000 files: {:.1} ms",
+            elapsed.as_secs_f64() * 1000.0
+        );
+    }
+}
+
+#[cfg(test)]
+mod bench {
+    use super::*;
+
+    fn median(mut times: Vec<f64>) -> f64 {
+        times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        times[times.len() / 2]
+    }
+
+    #[test]
+    #[ignore]
+    fn sort_hundreds_of_thousands_reports_median() {
+        for n in [50_000usize, 200_000] {
+            debug_assert!(!n.is_multiple_of(7919), "stride shares a factor with n");
+            let mut times = Vec::new();
+            for _ in 0..3 {
+                // Rebuild the input each round so every round sorts afresh.
+                // Non-padded names so the numeric path runs, as in the fast test.
+                let mut files: Vec<PathBuf> = (0..n)
+                    .map(|i| PathBuf::from(format!("img-{}.png", (i * 7919) % n)))
+                    .collect();
+                let start = std::time::Instant::now();
+                sort_image_files(&mut files);
+                times.push(start.elapsed().as_secs_f64() * 1000.0);
+            }
+            println!("BENCH sort {n} files: median {:.1} ms", median(times));
+        }
+    }
 }
