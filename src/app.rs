@@ -18,11 +18,25 @@ pub(crate) const ICON_ASSOC: char = '\u{1F517}';
 /// 中ボタンを押している間の拡大率（押した時点の表示倍率に対する倍数）。
 pub const PEEK_MAGNIFICATION: f32 = 2.0;
 
+/// 手動ズームの範囲。fit倍率もこの中に収まるため、fit→手動への
+/// 移行で倍率が跳ばない。下限は巨大画像のfit、上限は等倍観察用。
+pub const ZOOM_MIN: f32 = 0.01;
+pub const ZOOM_MAX: f32 = 32.0;
+
 /// ツールバーで使う全アイコン。tofu防止の回帰テスト用。
 pub const TOOLBAR_ICONS: &[char] = &[
     ICON_OPEN, ICON_PREV, ICON_NEXT, ICON_FIT, ICON_ROT_L, ICON_ROT_R, ICON_PLAY, ICON_STOP,
     ICON_FULL, ICON_ASSOC,
 ];
+
+/// Full-size rotated copies up to this are cached (`oriented_base`); bigger
+/// ones are re-rotated per upscale request. Bounds the rotation double-hold
+/// well below the decode budget while keeping normal images jank-free.
+pub(crate) const ORIENTED_CACHE_MAX_BYTES: usize = 64 * 1024 * 1024;
+
+/// 可視行を超えて保持するサムネイル上限（LRU）。128pxタイルは約64KiB/枚の
+/// ため数MiBで収まり、数画面分のスクロールバックを再デコードなしで返す。
+pub(crate) const THUMB_KEEP_MAX: usize = 64;
 
 pub fn setup_jp_font(ctx: &egui::Context) {
     let candidates = [
@@ -82,6 +96,8 @@ pub struct ViewerApp {
     /// Last view the worker could not resample; not requested again.
     pub(crate) upscale_failed: Option<crate::upscale::UpscaleKey>,
     /// `base` rotated to the display orientation: (generation, rotation, image).
+    /// Only modest rotations are cached (see [`ORIENTED_CACHE_MAX_BYTES`]);
+    /// huge ones are re-rotated per upscale request to bound memory.
     pub(crate) oriented_base: Option<(u64, u8, std::sync::Arc<image::RgbaImage>)>,
     pub(crate) load_error: Option<String>,
     /// Receiver for a native file dialog running off the egui/UI thread.
@@ -122,6 +138,10 @@ pub struct ViewerApp {
     pub(crate) toolbar_pinned: bool,
     pub(crate) thumbnails: std::collections::HashMap<PathBuf, egui::TextureHandle>,
     pub(crate) thumbnail_loader: ImageLoader,
+    /// Recently visible thumbnails, most-recent last; retention is decoupled
+    /// from visibility so scrolling back does not re-decode.
+    pub(crate) thumb_lru: std::collections::VecDeque<PathBuf>,
+    pub(crate) thumb_retained: std::collections::HashSet<PathBuf>,
     pub(crate) show_assoc: bool,
     pub(crate) assoc_status: Vec<(String, bool)>,
     /// Last time the tracked window size was written to disk. Writes are
@@ -190,6 +210,8 @@ impl ViewerApp {
             toolbar_pinned: false,
             thumbnails: std::collections::HashMap::new(),
             thumbnail_loader: ImageLoader::for_thumbnails(),
+            thumb_lru: std::collections::VecDeque::new(),
+            thumb_retained: std::collections::HashSet::new(),
             show_assoc: false,
             assoc_status: Vec::new(),
             last_window_save: Instant::now(),
@@ -250,6 +272,10 @@ impl ViewerApp {
         self.rotation = 0;
         self.fit = true;
         self.zoom = 1.0;
+        // 別フォルダの一覧になったため、サムネイルの保持世代を捨てる
+        // （次フレームの可視分から作り直す。古いパスは触れない）。
+        self.thumb_lru.clear();
+        self.thumb_retained.clear();
         self.load_current(ctx);
     }
 
@@ -483,7 +509,7 @@ impl ViewerApp {
     /// 現在の表示倍率。fit中は領域に合わせた倍率を返す。
     pub fn current_scale(&self, avail: egui::Vec2, iw: f32, ih: f32) -> f32 {
         if self.fit {
-            (avail.x / iw).min(avail.y / ih).clamp(0.01, 8.0)
+            (avail.x / iw).min(avail.y / ih).clamp(ZOOM_MIN, 8.0)
         } else {
             self.zoom
         }
@@ -519,7 +545,7 @@ impl ViewerApp {
         iw: f32,
         ih: f32,
     ) {
-        let new_scale = (old_scale * factor).clamp(0.05, 32.0);
+        let new_scale = (old_scale * factor).clamp(ZOOM_MIN, ZOOM_MAX);
         if new_scale == old_scale {
             return;
         }
@@ -535,7 +561,7 @@ impl ViewerApp {
     /// 画面中央基準のズーム（ツールバー・キー用）。パンは変えない。
     pub fn zoom_centered(&mut self, factor: f32) {
         let old = self.current_scale(self.view_avail, self.view_img.x, self.view_img.y);
-        let new = (old * factor).clamp(0.05, 32.0);
+        let new = (old * factor).clamp(ZOOM_MIN, ZOOM_MAX);
         if new == old {
             return;
         }
@@ -571,7 +597,7 @@ impl ViewerApp {
             return false;
         }
         let scale = self.current_scale(avail, iw, ih);
-        let target = (scale * PEEK_MAGNIFICATION).clamp(0.05, 32.0);
+        let target = (scale * PEEK_MAGNIFICATION).clamp(ZOOM_MIN, ZOOM_MAX);
         if target <= scale {
             return false;
         }
@@ -722,7 +748,9 @@ impl ViewerApp {
         let size = img_rect.size() / scale;
         let lo = ((screen.min - img_rect.min) / scale).max(egui::Vec2::ZERO);
         let hi = ((screen.max - img_rect.min) / scale).min(size);
-        let (source, origin, id) = self.upscale_source(lo, hi)?;
+        // Identify first without allocating: the rotation below runs only when
+        // a new request is actually sent, never while waiting for one.
+        let (id, origin) = self.upscale_source_id(lo, hi)?;
         let q = crate::upscale::UpscaleKey::quantize;
         let key = crate::upscale::UpscaleKey {
             generation: self.generation,
@@ -752,6 +780,7 @@ impl ViewerApp {
             return None;
         }
         if self.upscale_pending.as_ref() != Some(&key) {
+            let source = self.upscale_source(id)?;
             self.upscaler.request(key.clone(), source);
             self.upscale_pending = Some(key);
         }
@@ -761,20 +790,17 @@ impl ViewerApp {
 
     /// Full-resolution pixels covering `lo..hi` (display-image pixels): the loaded
     /// original-size region, or the base image when it was never downscaled.
-    /// Returns the image, its offset in the display image, and an identity for keys.
-    fn upscale_source(
-        &mut self,
-        lo: egui::Vec2,
-        hi: egui::Vec2,
-    ) -> Option<(std::sync::Arc<image::RgbaImage>, egui::Vec2, [u32; 4])> {
-        if let Some((region, rgba)) = &self.detail_rgba {
+    /// Returns the source identity and its offset for key building. Allocates
+    /// nothing, so it is safe to call every frame while waiting for a request.
+    fn upscale_source_id(&self, lo: egui::Vec2, hi: egui::Vec2) -> Option<([u32; 4], egui::Vec2)> {
+        if let Some((region, _)) = &self.detail_rgba {
             let [x, y, w, h] = *region;
             if lo.x >= x as f32
                 && lo.y >= y as f32
                 && hi.x <= (x + w) as f32
                 && hi.y <= (y + h) as f32
             {
-                return Some((rgba.clone(), egui::vec2(x as f32, y as f32), *region));
+                return Some((*region, egui::vec2(x as f32, y as f32)));
             }
         }
         let base = self.base.as_ref()?;
@@ -782,6 +808,23 @@ impl ViewerApp {
         if base.width() != ow || base.height() != oh {
             return None; // Only a downscaled preview: wait for the original region.
         }
+        let (w, h) = if self.rotation % 2 == 1 {
+            (oh, ow)
+        } else {
+            (ow, oh)
+        };
+        Some(([0, 0, w, h], egui::Vec2::ZERO))
+    }
+
+    /// Materializes the pixels for an identity from [`Self::upscale_source_id`].
+    /// Rotates (and caches, when modest) only here, i.e. once per new request.
+    fn upscale_source(&mut self, id: [u32; 4]) -> Option<std::sync::Arc<image::RgbaImage>> {
+        if let Some((region, rgba)) = &self.detail_rgba {
+            if *region == id {
+                return Some(rgba.clone());
+            }
+        }
+        let base = self.base.as_ref()?.clone();
         let oriented = match &self.oriented_base {
             Some((generation, rotation, image))
                 if *generation == self.generation && *rotation == self.rotation =>
@@ -789,17 +832,24 @@ impl ViewerApp {
                 image.clone()
             }
             _ => {
-                let image = if self.rotation == 0 {
-                    base.clone()
+                if self.rotation == 0 {
+                    let image = base.clone();
+                    self.oriented_base = Some((self.generation, self.rotation, image.clone()));
+                    image
                 } else {
-                    std::sync::Arc::new(rotate_rgba(base, self.rotation))
-                };
-                self.oriented_base = Some((self.generation, self.rotation, image.clone()));
-                image
+                    // Huge rotations skip the cache: re-rotating per view costs
+                    // CPU but never doubles a giant allocation.
+                    let rotated = std::sync::Arc::new(rotate_rgba(&base, self.rotation));
+                    if rotated.as_raw().len() <= ORIENTED_CACHE_MAX_BYTES {
+                        self.oriented_base =
+                            Some((self.generation, self.rotation, rotated.clone()));
+                    }
+                    rotated
+                }
             }
         };
-        let id = [0, 0, oriented.width(), oriented.height()];
-        Some((oriented, egui::Vec2::ZERO, id))
+        debug_assert_eq!([0, 0, oriented.width(), oriented.height()], id);
+        Some(oriented)
     }
 
     pub(crate) fn request_detail(&mut self, region: [u32; 4]) {
@@ -1071,7 +1121,40 @@ mod tests {
             100.0,
             100.0,
         );
-        assert!(approx(app.zoom_level(), 0.05));
+        assert!(approx(app.zoom_level(), 0.01));
+    }
+
+    #[test]
+    pub(crate) fn fit_to_manual_zoom_has_no_jump() {
+        // fit倍率が手動範囲内にあるため、移行初手でクランプに跳ばない。
+        let mut app = ViewerApp::new(None);
+        app.fit = false;
+        app.zoom = 1.0;
+        app.pan_offset = egui::Vec2::ZERO;
+        let avail = egui::vec2(1000.0, 700.0);
+        // 巨大画像のfit相当（旧下限0.05未満）から +25%: 0.025 のまま。
+        app.zoom_at(
+            1.25,
+            egui::pos2(500.0, 350.0),
+            egui::pos2(500.0, 350.0),
+            0.02,
+            avail,
+            2000.0,
+            1400.0,
+        );
+        assert!(!app.is_fit());
+        assert!(approx(app.zoom_level(), 0.025));
+        // 小画像のfit相当（8.0）から -20%: 6.4 のまま。
+        app.zoom_at(
+            1.0 / 1.25,
+            egui::pos2(500.0, 350.0),
+            egui::pos2(500.0, 350.0),
+            8.0,
+            avail,
+            100.0,
+            100.0,
+        );
+        assert!(approx(app.zoom_level(), 6.4));
     }
 
     #[test]
@@ -1469,5 +1552,40 @@ mod tests {
             (1400, 1200)
         );
         std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn huge_rotated_image_skips_oriented_cache() {
+        let ctx = egui::Context::default();
+        let _ = ctx.run(egui::RawInput::default(), |_| {});
+        let mut app = ViewerApp::new(None);
+        // Install an over-threshold base directly: the loader caps previews at
+        // 2048px, so this guards the bound if caps ever rise. 80 MiB is over
+        // the 64 MiB rotation-cache threshold.
+        app.base = Some(std::sync::Arc::new(image::RgbaImage::from_pixel(
+            5000,
+            4000,
+            image::Rgba([7, 8, 9, 255]),
+        )));
+        app.orig_dims = Some((5000, 4000));
+        app.rotation = 1;
+        // Display is 4000x5000 after the rotation, magnified 2x.
+        let view = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(300.0, 200.0));
+        let img = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(8000.0, 10000.0));
+        let start = Instant::now();
+        loop {
+            if app.update_upscale(&ctx, view, img, 2.0).is_some() {
+                break;
+            }
+            app.poll_loading(&ctx);
+            assert!(
+                start.elapsed() < Duration::from_secs(60),
+                "upscale timed out (failed: {:?})",
+                app.upscale_failed.is_some()
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        // Served from a per-request rotation: no second full copy is kept.
+        assert!(app.oriented_base.is_none());
+        assert!(app.upscale_tex.is_some());
     }
 }
