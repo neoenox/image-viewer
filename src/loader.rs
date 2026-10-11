@@ -315,21 +315,21 @@ impl ImageLoader {
     pub fn prune(&self, keep: &[PathBuf], cap: usize) {
         let mut state = self.shared.0.lock_recover();
         // 照合はHashSetで1回だけ固め、3つのretainを線形にする。
-        let keep: HashSet<PathBuf> = keep.iter().cloned().collect();
+        let keep_set: HashSet<PathBuf> = keep.iter().cloned().collect();
         state.keep_cap = Some(cap);
         state
             .failed
-            .retain(|(p, c), _| keep.contains(p) && *c == cap);
+            .retain(|(p, c), _| keep_set.contains(p) && *c == cap);
         state
             .preloads
-            .retain(|(p, c)| keep.contains(p) && *c == cap);
+            .retain(|(p, c)| keep_set.contains(p) && *c == cap);
         state
             .cache
-            .retain(|(p, c), _| keep.contains(p) && *c == cap);
+            .retain(|(p, c), _| keep_set.contains(p) && *c == cap);
         let keys: HashSet<_> = state.cache.keys().cloned().collect();
         state.order.retain(|k| keys.contains(k));
         state.bytes = state.cache.values().map(|v| v.rgba.as_raw().len()).sum();
-        state.keep = keep;
+        state.keep = keep_set;
     }
 }
 impl Drop for ImageLoader {
@@ -601,15 +601,32 @@ mod tests {
             assert!(!state.cache.contains_key(&key(7999)));
             assert_eq!(state.preloads.len(), 4000);
             assert!(state.preloads.iter().all(|(p, _)| {
-                let name = p.file_name().unwrap().to_string_lossy();
-                let n: usize = name[6..11].parse().unwrap();
+                let stem = p.file_stem().unwrap().to_string_lossy();
+                let n: usize = stem.strip_prefix("thumb-").unwrap().parse().unwrap();
                 n.is_multiple_of(2)
             }));
             // i % 16 < 2 failed: even indices kept, odd evicted.
             assert_eq!(state.failed.len(), 500);
             assert!(state.failed.contains_key(&key(0)));
             assert!(!state.failed.contains_key(&key(1)));
+            // prune postconditions beyond the three filtered queues.
+            assert_eq!(state.order.len(), 4000);
+            assert!(state.order.contains(&key(0)));
+            assert!(!state.order.contains(&key(1)));
+            assert!(state.order.iter().all(|k| state.cache.contains_key(k)));
+            assert_eq!(state.bytes, 4000 * 8 * 8 * 4);
+            assert_eq!(state.keep.len(), 4000);
+            assert!(state.keep.contains(&key(0).0));
+            assert!(state.keep.contains(&key(7998).0));
+            assert!(!state.keep.contains(&key(1).0));
+            assert_eq!(state.keep_cap, Some(128));
         }
+        // Generous bound (debug measured ~45ms): trips on quadratic
+        // regressions, not on normal CI jitter.
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "prune 8000/4000 took {elapsed:?}"
+        );
         println!(
             "BENCH prune 8000 cached / 4000 kept: {:.1} ms",
             elapsed.as_secs_f64() * 1000.0
