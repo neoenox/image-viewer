@@ -144,12 +144,128 @@ mod tests {
         assert_eq!(img.dimensions(), (4, 2));
         assert!(!is_red(img.get_pixel(0, 0)) && is_red(img.get_pixel(3, 0)));
 
+        // 8 = rotate 270 degrees clockwise: dimensions swap, red ends up at
+        // the bottom.
+        jpeg_with_orientation(&path, 8);
+        let img = decode_image(&path).unwrap().into_rgba8();
+        assert_eq!(img.dimensions(), (2, 4));
+        assert!(!is_red(img.get_pixel(0, 0)) && is_red(img.get_pixel(0, 3)));
+
+        // 2 = flip horizontal: dimensions stay, red moves to the right.
+        jpeg_with_orientation(&path, 2);
+        let img = decode_image(&path).unwrap().into_rgba8();
+        assert_eq!(img.dimensions(), (4, 2));
+        assert!(!is_red(img.get_pixel(0, 0)) && is_red(img.get_pixel(3, 0)));
+
         // 1 = as stored.
         jpeg_with_orientation(&path, 1);
         let img = decode_image(&path).unwrap().into_rgba8();
         assert_eq!(img.dimensions(), (4, 2));
         assert!(is_red(img.get_pixel(0, 0)));
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn unreadable_exif_decodes_as_stored() {
+        let dir = std::env::temp_dir().join(format!("iv-exif-garbage-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("garbage.jpg");
+        let img = image::RgbImage::from_fn(4, 2, |x, _| {
+            if x < 2 {
+                image::Rgb([255, 0, 0])
+            } else {
+                image::Rgb([0, 0, 255])
+            }
+        });
+        let mut bytes = Vec::new();
+        let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, 100);
+        // Not a TIFF header: orientation lookup must fall back instead of
+        // failing the decode.
+        encoder
+            .set_exif_metadata(b"NOT-A-TIFF-HEADER".to_vec())
+            .unwrap();
+        encoder
+            .write_image(img.as_raw(), 4, 2, image::ExtendedColorType::Rgb8)
+            .unwrap();
+        std::fs::write(&path, bytes).unwrap();
+        let img = decode_image(&path).unwrap().into_rgba8();
+        assert_eq!(img.dimensions(), (4, 2));
+        assert!(is_red(img.get_pixel(0, 0)) && !is_red(img.get_pixel(3, 0)));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn rotate_rgba_swaps_dimensions_on_quarter_turns() {
+        let base = image::RgbaImage::from_pixel(4, 2, image::Rgba([1, 2, 3, 255]));
+        assert_eq!(rotate_rgba(&base, 0).dimensions(), (4, 2));
+        assert_eq!(rotate_rgba(&base, 1).dimensions(), (2, 4));
+        assert_eq!(rotate_rgba(&base, 2).dimensions(), (4, 2));
+        assert_eq!(rotate_rgba(&base, 3).dimensions(), (2, 4));
+        // Callers keep rotation in 0..4, but the function itself wraps.
+        assert_eq!(rotate_rgba(&base, 5).dimensions(), (2, 4));
+    }
+
+    /// Minimal PNG claiming absurd dimensions: header only, no pixel data.
+    fn bomb_png(path: &Path, w: u32, h: u32) {
+        fn crc32(data: &[u8]) -> u32 {
+            let mut crc = 0xFFFF_FFFFu32;
+            for &byte in data {
+                crc ^= u32::from(byte);
+                for _ in 0..8 {
+                    let mask = crc & 1;
+                    crc >>= 1;
+                    if mask != 0 {
+                        crc ^= 0xEDB8_8320;
+                    }
+                }
+            }
+            !crc
+        }
+        fn chunk(kind: &[u8; 4], data: &[u8]) -> Vec<u8> {
+            let mut out = Vec::new();
+            out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+            out.extend_from_slice(kind);
+            out.extend_from_slice(data);
+            let mut covered = Vec::from(&kind[..]);
+            covered.extend_from_slice(data);
+            out.extend_from_slice(&crc32(&covered).to_be_bytes());
+            out
+        }
+        let mut ihdr = Vec::new();
+        ihdr.extend_from_slice(&w.to_be_bytes());
+        ihdr.extend_from_slice(&h.to_be_bytes());
+        // 8-bit truecolor, default compression/filter/interlace.
+        ihdr.extend_from_slice(&[8, 2, 0, 0, 0]);
+        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+        png.extend(chunk(b"IHDR", &ihdr));
+        // Valid but empty zlib stream: construction succeeds, pixel data is
+        // never touched because the dimension check rejects first.
+        png.extend(chunk(
+            b"IDAT",
+            &[0x78, 0x01, 0x01, 0x00, 0xFE, 0xFF, 0x00, 0x00, 0x00, 0x01],
+        ));
+        png.extend(chunk(b"IEND", &[]));
+        std::fs::write(path, png).unwrap();
+    }
+
+    #[test]
+    fn oversized_dimensions_are_rejected_before_decoding() {
+        let dir = std::env::temp_dir().join(format!("iv-bomb-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("bomb.png");
+        // 40000x40000 claims ~12 GiB: must fail fast on the header check alone.
+        bomb_png(&path, 40_000, 40_000);
+        let start = std::time::Instant::now();
+        let error = decode_image(&path).expect_err("image bomb must be rejected");
+        assert!(
+            matches!(error, image::ImageError::Limits(_)),
+            "unexpected error: {error}"
+        );
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(5),
+            "took too long: decoded instead of rejecting?"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 }
