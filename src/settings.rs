@@ -1,4 +1,7 @@
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static SAVE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// Default window size in UI points: first launch, and when the saved value
 /// is missing or invalid.
@@ -177,8 +180,10 @@ impl ViewerSettings {
         text.push_str(&format!("restore_window={}\n", self.restore_window));
         // Write-then-rename so a crash never leaves a half-written file: the
         // previous complete file stays in place until the rename. The pid
-        // suffix keeps two running instances from sharing the temp file.
-        let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
+        // suffix separates running processes; sequence separates concurrent
+        // saves within the same process (window tracking and user settings).
+        let sequence = SAVE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let tmp = path.with_extension(format!("tmp.{}.{}", std::process::id(), sequence));
         if let Err(error) = std::fs::write(&tmp, text).and_then(|()| std::fs::rename(&tmp, path)) {
             let _ = std::fs::remove_file(&tmp);
             return Err(error);
