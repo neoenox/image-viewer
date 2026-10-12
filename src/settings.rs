@@ -275,4 +275,29 @@ mod tests {
         assert!(ViewerSettings::load(&path).restore_window);
         std::fs::remove_dir_all(dir).unwrap();
     }
+
+    #[test]
+    fn repeated_saves_are_byte_identical() {
+        // Saving twice with no changes must not accumulate content (no
+        // duplicated lines, no growing temp litter): the file is idempotent.
+        let dir = std::env::temp_dir().join(format!("viewer-settings-idem-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.txt");
+        let settings = ViewerSettings {
+            window_x: Some(-30),
+            ..ViewerSettings::default()
+        };
+        settings.save(&path).unwrap();
+        let first = std::fs::read(&path).unwrap();
+        settings.save(&path).unwrap();
+        let second = std::fs::read(&path).unwrap();
+        settings.save(&path).unwrap();
+        let third = std::fs::read(&path).unwrap();
+        assert_eq!(first, second);
+        assert_eq!(second, third);
+        // And a load-save cycle is a fixed point too.
+        ViewerSettings::load(&path).save(&path).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), third);
+        std::fs::remove_dir_all(dir).ok();
+    }
 }
