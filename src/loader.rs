@@ -519,6 +519,56 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
     #[test]
+    fn repeated_navigation_over_large_images_stays_within_budget() {
+        // Acceptance guard (#48): continuous switching must not grow memory.
+        // 8 images x 2048x1536 (~12 MiB each) exceed the 80 MiB budget, so
+        // eviction runs every round; usage must stay bounded, not creep up.
+        let dir = std::env::temp_dir().join(format!("viewer-navbudget-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let paths: Vec<PathBuf> = (0..8)
+            .map(|i| {
+                let path = dir.join(format!("big-{i}.png"));
+                image::RgbaImage::from_fn(2048, 1536, |x, y| {
+                    image::Rgba([(x % 251) as u8, (y % 251) as u8, i as u8, 255])
+                })
+                .save(&path)
+                .unwrap();
+                path
+            })
+            .collect();
+        let loader = ImageLoader::new();
+        let start = std::time::Instant::now();
+        let mut peaks = Vec::new();
+        for round in 0..3u64 {
+            for (i, path) in paths.iter().enumerate() {
+                let generation = round * 8 + i as u64 + 1;
+                loader.select(generation, path.clone(), 2048);
+                loop {
+                    if let Some((gen, result)) = loader.poll() {
+                        assert_eq!(gen, generation);
+                        assert!(result.is_ok(), "round {round} image {i}");
+                        break;
+                    }
+                    assert!(start.elapsed() < std::time::Duration::from_secs(120));
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                }
+            }
+            let bytes = loader.shared.0.lock_recover().bytes;
+            println!("BENCH nav round {round}: cache {} KiB", bytes / 1024);
+            peaks.push(bytes);
+        }
+        let state = loader.shared.0.lock_recover();
+        assert!(
+            state.bytes <= CACHE_BUDGET,
+            "cache {} exceeds budget {}",
+            state.bytes,
+            CACHE_BUDGET
+        );
+        assert!(peaks[2] <= peaks[0], "cache grew across rounds: {peaks:?}");
+        assert!(state.active.is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
     fn current_selection_supersedes_pending_work_and_errors_recover() {
         let dir = std::env::temp_dir().join(format!("viewer-priority-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
