@@ -1,5 +1,9 @@
 mod animation;
 mod app;
+#[cfg(windows)]
+pub mod assoc;
+#[cfg(not(windows))]
+#[path = "assoc_nonwindows.rs"]
 pub mod assoc;
 mod files;
 mod imaging;
