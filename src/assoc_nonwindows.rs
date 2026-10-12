@@ -28,7 +28,7 @@ pub fn unregister(
     _prog_id: &str,
     _app_name: &str,
     _caps_base: &str,
-    _exe_name: &str,
+    _exe: &Path,
 ) -> io::Result<()> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
@@ -39,5 +39,11 @@ pub fn open_default_apps() -> io::Result<std::process::Child> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "default-app settings require Windows",
+    ))
+}
+pub fn print_assoc_config() -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "file associations require Windows",
     ))
 }

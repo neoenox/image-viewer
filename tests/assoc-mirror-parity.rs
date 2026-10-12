@@ -20,13 +20,11 @@ fn nonwindows_mirror_accepts_shared_call_shapes() {
         &exe,
         &["jpg"],
     );
-    // Same shape as the unregister call in `view.rs` (exe file name).
-    let name = exe
-        .file_name()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let _ = mirror::unregister(mirror::PROG_ID, mirror::APP_NAME, mirror::CAPS_BASE, &name);
+    // Same shape as the unregister call in `view.rs` (exe path).
+    let _ = mirror::unregister(mirror::PROG_ID, mirror::APP_NAME, mirror::CAPS_BASE, &exe);
     let _ = mirror::open_default_apps();
+    // Same shape as the config call in `main.rs`.
+    let _ = mirror::print_assoc_config();
     assert!(!mirror::is_default("jpg", mirror::PROG_ID));
     assert_eq!(mirror::exe_path().unwrap(), exe);
 }
