@@ -215,8 +215,15 @@ mod tests {
             window_maximized: true,
             restore_window: false,
         };
+        // Regression: a stale same-PID file from another save must never be
+        // truncated. Each save now writes its own unique temporary pathname.
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let stale = path.with_extension(format!("tmp.{}", std::process::id()));
+        std::fs::write(&stale, "stale-settings").unwrap();
         changed.save(&path).unwrap();
         assert_eq!(ViewerSettings::load(&path), changed);
+        assert_eq!(std::fs::read_to_string(&stale).unwrap(), "stale-settings");
+        std::fs::remove_file(&stale).unwrap();
         // The save is atomic: no temp file of this process is left behind.
         assert!(
             !path
