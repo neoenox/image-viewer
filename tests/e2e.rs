@@ -711,6 +711,10 @@ fn rapid_navigation_applies_only_latest_image() {
     cleanup(&dir);
 }
 
+// Windows-only CLI output for the PS wrappers: the non-Windows mirror
+// reports Unsupported (exit 1), so this runs on Windows only, like the
+// registry round-trip test above.
+#[cfg(windows)]
 #[test]
 fn print_assoc_config_reports_canonical_constants() {
     // 実バイナリを子プロセス起動し、PSラッパー向け定数出力を検証する。
