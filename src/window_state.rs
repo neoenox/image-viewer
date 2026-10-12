@@ -356,6 +356,43 @@ mod tests {
     }
 
     #[test]
+    fn tracked_window_state_and_unknown_keys_persist_together() {
+        // Integration (#57 x #46): a frame updates the tracked geometry and
+        // the flush writes it without dropping future keys from the file.
+        let dir = std::env::temp_dir()
+            .join(format!("image-viewer-wininteg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.txt");
+        std::fs::write(
+            &path,
+            "version=1\nwindow_width=640\nwindow_height=480\ntelemetry_level=2\n",
+        )
+        .unwrap();
+        let ctx = egui::Context::default();
+        let mut app = ViewerApp::new(None);
+        app.settings = crate::settings::ViewerSettings::load(&path);
+        app.settings_path = Some(path.clone());
+        // Normal frame with close requested: tracks 1280x800 and flushes.
+        track_frame(
+            &mut app,
+            &ctx,
+            window_info([10.0, 20.0], [1280.0, 800.0], false, true),
+        );
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("window_width=1280\n"), "{text}");
+        assert!(text.contains("window_x=10\n"), "{text}");
+        assert!(text.contains("telemetry_level=2\n"), "{text}");
+        assert_eq!(text.matches("version=1\n").count(), 1, "{text}");
+        let reloaded = crate::settings::ViewerSettings::load(&path);
+        assert_eq!(reloaded.window_width, 1280);
+        assert_eq!(
+            reloaded.unknown,
+            [("telemetry_level".to_owned(), "2".to_owned())]
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
     fn build_viewport_applies_saved_or_default_geometry() {
         // 全値あり: サイズ・位置・最大化が反映される。
         let settings = ViewerSettings {
