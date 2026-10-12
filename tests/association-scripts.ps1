@@ -31,13 +31,38 @@ try {
     $env:LOCALAPPDATA = $tempRoot
     $associate = [scriptblock]::Create((Get-Content (Join-Path $PSScriptRoot '..\scripts\associate.ps1') -Raw).Replace('HKCU:', 'IVReview:'))
     $unassociate = [scriptblock]::Create((Get-Content (Join-Path $PSScriptRoot '..\scripts\unassociate.ps1') -Raw).Replace('HKCU:', 'IVReview:'))
-    $exe = (Get-Process -Id $PID).Path
+    $exe = Join-Path $PSScriptRoot '..\target\debug\image-viewer.exe'
+    if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) {
+        throw "debug exeが見つかりません: $exe（先に cargo build してください）"
+    }
+    # exeが正本とする関連付け定数を取得（テスト内の二重管理を避ける）。
+    $previousEncoding = [Console]::OutputEncoding
+    try {
+        [Console]::OutputEncoding = [Text.Encoding]::UTF8
+        $config = @{}
+        foreach ($line in (& $exe --print-assoc-config)) {
+            if ($line -match '^([^=]+)=(.*)$') { $config[$Matches[1]] = $Matches[2] }
+        }
+    } finally {
+        [Console]::OutputEncoding = $previousEncoding
+    }
+    $progId = $config['prog_id']
+    $appName = $config['app_name']
+    $capsBase = $config['caps_base']
+    Assert-True (-not [string]::IsNullOrWhiteSpace($progId)) 'prog_idを取得できませんでした'
     & $associate -ExePath $exe
     Assert-AssociationsPreserved
+    # 登録が実際に行われたこと（空振りでないこと）。
+    Assert-True (Test-Path "IVReview:\Software\Classes\$progId") 'ProgIDキーが作られていません'
+    Assert-True ((Get-ItemProperty "IVReview:\Software\Classes\Applications\$($config['app_exe'])\SupportedTypes").PSObject.Properties.Name -contains '.jpg') 'SupportedTypesに.jpgがありません'
+    Assert-True ((Get-ItemProperty "IVReview:\$capsBase\FileAssociations").'.png' -eq $progId) 'FileAssociationsの.pngがProgIDを指していません'
     & $associate -ExePath $exe
     Assert-AssociationsPreserved
-    & $unassociate
+    & $unassociate -ExePath $exe
     Assert-AssociationsPreserved
+    Assert-True (-not (Test-Path "IVReview:\Software\Classes\$progId")) 'ProgIDキーが残っています'
+    Assert-True (-not (Test-Path "IVReview:\$capsBase")) 'Capabilitiesが残っています'
+    Assert-True ((Get-ItemProperty 'IVReview:\Software\RegisteredApplications').PSObject.Properties.Name -notcontains $appName) 'RegisteredApplicationsの値が残っています'
     Assert-True (Test-Path 'IVReview:\Software\Classes\.jpg\OpenWithProgids') 'Other-app subkey was deleted'
     $other = Get-ItemProperty 'IVReview:\Software\Classes\.jpg\OpenWithProgids'
     Assert-True ($other.PSObject.Properties.Name -contains 'OtherApp') 'Other-app value was deleted'
