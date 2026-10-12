@@ -304,6 +304,37 @@ mod tests {
     }
 
     #[test]
+    fn window_era_keys_survive_any_schema() {
+        // Bridge (#63 x #46): these lines are unknown to this version and
+        // known fields after #63. Either way a load-save cycle must keep
+        // them, exactly once, and reach a fixed point. This stays green on
+        // both sides of the #63 integration.
+        let dir = std::env::temp_dir().join(format!(
+            "viewer-settings-bridge-{}-{}",
+            std::process::id(),
+            SAVE_SEQUENCE.load(Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.txt");
+        std::fs::write(
+            &path,
+            "version=1\nwindow_width=1280\nwindow_height=800\nrestore_window=true\n",
+        )
+        .unwrap();
+        ViewerSettings::load(&path).save(&path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("window_width=1280\n"), "{text}");
+        assert!(text.contains("window_height=800\n"), "{text}");
+        assert!(text.contains("restore_window=true\n"), "{text}");
+        assert_eq!(text.matches("version=1\n").count(), 1, "{text}");
+        // Second cycle changes nothing: a fixed point, no duplication drift.
+        let once = std::fs::read(&path).unwrap();
+        ViewerSettings::load(&path).save(&path).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), once);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
     fn save_heals_stale_temp_file() {
         let dir = std::env::temp_dir().join(format!(
             "viewer-settings-stale-{}-{}",
