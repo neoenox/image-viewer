@@ -288,6 +288,13 @@ mod tests {
         let mut key = key([0.0, 0.0, 32.0, 32.0], (32, 32));
         key.out = (8192, 8192);
         assert!(resample(&image, &key).is_none());
+        // 8K output (7680x4320x4 = 132 MiB) is over the 32 MiB cap: an 8K
+        // display asking for a full-canvas resample falls back to preview.
+        key.out = (7680, 4320);
+        assert!(resample(&image, &key).is_none());
+        // 4K output (3840x2160x4 < 32 MiB) is still served.
+        key.out = (3840, 2160);
+        assert!(resample(&image, &key).is_some());
         assert_eq!(UpscaleKey::quantize(f32::NAN), i64::MAX);
     }
 
