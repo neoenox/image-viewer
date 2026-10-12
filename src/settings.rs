@@ -274,6 +274,36 @@ mod tests {
     }
 
     #[test]
+    fn old_format_without_version_migrates_cleanly() {
+        // Files written before schema versions existed: values carry over,
+        // the header is added on save, and nothing else changes shape.
+        let dir = std::env::temp_dir().join(format!(
+            "viewer-settings-oldfmt-{}-{}",
+            std::process::id(),
+            SAVE_SEQUENCE.load(Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.txt");
+        std::fs::write(
+            &path,
+            "wheel_navigation=false\nhold_to_peek=false\nhover_pan=false\nauto_hide_toolbar=false\nzoom_quality=standard\n",
+        )
+        .unwrap();
+        let loaded = ViewerSettings::load(&path);
+        assert!(!loaded.wheel_navigation && !loaded.hover_pan);
+        assert_eq!(loaded.zoom_quality, ZoomQuality::Standard);
+        assert!(loaded.unknown.is_empty());
+        loaded.save(&path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.starts_with("version=1\n"), "{text}");
+        assert!(text.contains("wheel_navigation=false\n"), "{text}");
+        assert!(text.contains("zoom_quality=standard\n"), "{text}");
+        // Reloading the migrated file yields the same settings.
+        assert_eq!(ViewerSettings::load(&path), loaded);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
     fn save_heals_stale_temp_file() {
         let dir = std::env::temp_dir().join(format!(
             "viewer-settings-stale-{}-{}",
