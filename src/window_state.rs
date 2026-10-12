@@ -239,11 +239,8 @@ mod tests {
         assert!(saved.contains("window_width=1280\n"), "{saved}");
         assert!(saved.contains("window_x=100\n"), "{saved}");
         assert!(saved.contains("window_maximized=false\n"), "{saved}");
-        // 保存内容から復元できる。
-        assert_eq!(
-            crate::settings::ViewerSettings::load(&path).window_height,
-            800
-        );
+        // 保存内容から全項目が復元できる（追跡経路の完全往復）。
+        assert_eq!(crate::settings::ViewerSettings::load(&path), app.settings);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
