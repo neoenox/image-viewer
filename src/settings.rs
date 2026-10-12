@@ -293,12 +293,7 @@ mod tests {
         let stray: Vec<_> = std::fs::read_dir(dir.join("nested"))
             .unwrap()
             .filter_map(|entry| entry.ok())
-            .filter(|entry| {
-                entry
-                    .file_name()
-                    .to_string_lossy()
-                    .contains(".tmp.")
-            })
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp."))
             .collect();
         assert!(stray.is_empty(), "stray temp files after save: {stray:?}");
         // A second save creates a recovery copy before the replacement.
@@ -306,10 +301,7 @@ mod tests {
         // is that the .bak holds the exact pre-save settings.
         ViewerSettings::default().save(&path).unwrap();
         assert!(path.with_extension("bak").is_file());
-        assert_eq!(
-            ViewerSettings::load(&path.with_extension("bak")),
-            changed
-        );
+        assert_eq!(ViewerSettings::load(&path.with_extension("bak")), changed);
         assert_eq!(ViewerSettings::load(&path), ViewerSettings::default());
         changed.save(&path).unwrap();
         // Unknown keys and bad values are ignored; known good lines still apply.
@@ -380,11 +372,7 @@ mod tests {
         let path = dir.join("settings.txt");
         // Fields from a newer release: understood by neither load nor save
         // as settings, yet never dropped either.
-        std::fs::write(
-            &path,
-            "version=1\ntelemetry_level=2\nfuture_option=true\n",
-        )
-        .unwrap();
+        std::fs::write(&path, "version=1\ntelemetry_level=2\nfuture_option=true\n").unwrap();
         let loaded = ViewerSettings::load(&path);
         // Known fields stay at their defaults; only `unknown` differs.
         assert_eq!(
