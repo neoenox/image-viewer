@@ -5,7 +5,7 @@ mod files;
 mod imaging;
 mod input;
 mod loader;
-mod settings;
+pub mod settings;
 mod sync;
 mod upscale;
 mod view;
