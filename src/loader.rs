@@ -1,4 +1,6 @@
-use crate::imaging::{decode_image, downscale_to_cap, rotate_rgba};
+use crate::imaging::{
+    decode_image_with_format, decode_image_with_pixel_budget, downscale_to_cap, rotate_rgba,
+};
 use crate::sync::{catch_panic, wait_recover, LockRecover};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -20,6 +22,9 @@ const FAILED_RETRY: Duration = Duration::from_secs(5);
 
 // Holds the five-image keep window (current ±2) at the 2048px cap (16MB each).
 pub(crate) const CACHE_BUDGET: usize = 80 * 1024 * 1024;
+/// Full-resolution detail source is separate from the thumbnail cache.
+/// Bound its single retained RGBA buffer to at most 128 MiB.
+const DETAIL_SOURCE_RGBA_BUDGET: u64 = 128 * 1024 * 1024;
 #[derive(Clone)]
 pub struct CachedImage {
     pub rgba: Arc<image::RgbaImage>,
@@ -358,14 +363,9 @@ fn load((path, cap): &Key) -> Result<CachedImage, String> {
             .entry(path.clone())
             .or_insert(0) += 1;
     }
-    let mut reader = image::ImageReader::open(path)
-        .map_err(|e| e.to_string())?
-        .with_guessed_format()
-        .map_err(|e| e.to_string())?;
-    let gif = reader.format() == Some(image::ImageFormat::Gif);
-    // Explicit format fallback follows ImageReader's extension handling.
-    reader.limits(image::Limits::default());
-    let image = decode_image(path).map_err(|e| e.to_string())?;
+    // Reuse the same ImageReader for format detection and decode (no double open/TOCTOU).
+    let (image, format) = decode_image_with_format(path).map_err(|e| e.to_string())?;
+    let gif = format == Some(image::ImageFormat::Gif);
     let orig = (image.width(), image.height());
     let rgba = Arc::new(downscale_to_cap(image.into_rgba8(), (*cap).min(2048))?);
     Ok(CachedImage { rgba, orig, gif })
@@ -399,7 +399,9 @@ fn detail_source(
     Ok(image)
 }
 fn decode_detail_source(path: &Path, rotation: u8) -> Result<image::RgbaImage, String> {
-    let image = decode_image(path).map_err(|e| e.to_string())?.into_rgba8();
+    let image = decode_image_with_pixel_budget(path, DETAIL_SOURCE_RGBA_BUDGET)
+        .map_err(|e| e.to_string())?
+        .into_rgba8();
     Ok(if rotation == 0 {
         image
     } else {
@@ -514,6 +516,56 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
         assert!(loader.shared.0.lock_recover().active.is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn repeated_navigation_over_large_images_stays_within_budget() {
+        // Acceptance guard (#48): continuous switching must not grow memory.
+        // 8 images x 2048x1536 (~12 MiB each) exceed the 80 MiB budget, so
+        // eviction runs every round; usage must stay bounded, not creep up.
+        let dir = std::env::temp_dir().join(format!("viewer-navbudget-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let paths: Vec<PathBuf> = (0..8)
+            .map(|i| {
+                let path = dir.join(format!("big-{i}.png"));
+                image::RgbaImage::from_fn(2048, 1536, |x, y| {
+                    image::Rgba([(x % 251) as u8, (y % 251) as u8, i as u8, 255])
+                })
+                .save(&path)
+                .unwrap();
+                path
+            })
+            .collect();
+        let loader = ImageLoader::new();
+        let start = std::time::Instant::now();
+        let mut peaks = Vec::new();
+        for round in 0..3u64 {
+            for (i, path) in paths.iter().enumerate() {
+                let generation = round * 8 + i as u64 + 1;
+                loader.select(generation, path.clone(), 2048);
+                loop {
+                    if let Some((gen, result)) = loader.poll() {
+                        assert_eq!(gen, generation);
+                        assert!(result.is_ok(), "round {round} image {i}");
+                        break;
+                    }
+                    assert!(start.elapsed() < std::time::Duration::from_secs(120));
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                }
+            }
+            let bytes = loader.shared.0.lock_recover().bytes;
+            println!("BENCH nav round {round}: cache {} KiB", bytes / 1024);
+            peaks.push(bytes);
+        }
+        let state = loader.shared.0.lock_recover();
+        assert!(
+            state.bytes <= CACHE_BUDGET,
+            "cache {} exceeds budget {}",
+            state.bytes,
+            CACHE_BUDGET
+        );
+        assert!(peaks[2] <= peaks[0], "cache grew across rounds: {peaks:?}");
+        assert!(state.active.is_empty());
         std::fs::remove_dir_all(dir).unwrap();
     }
     #[test]
