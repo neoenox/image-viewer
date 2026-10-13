@@ -448,4 +448,242 @@ mod tests {
             (None, None)
         );
     }
+
+    // Multi-monitor automation matrix (PR #63).
+    //
+    // Approach comparison (why only viewport-matrix is implemented):
+    // - virtual-display (IddSampleDriver): needs admin driver install + real
+    //   GPU + reboot; impossible on `windows-latest` CI (single virtual
+    //   monitor, no driver). Real multi-monitor rig still needed for E2E.
+    // - WinAPI-mock (hook EnumDisplayMonitors/GetDpiForMonitor): Windows-only,
+    //   unsafe detours, fragile across SDKs; CI still single-monitor so it
+    //   proves little beyond what the pure function proves.
+    // - viewport-matrix (this): pure `monitor_fit` geometry + `egui`
+    //   `ViewportInfo` mocks. Deterministic, cross-platform, CI-safe. It
+    //   covers add/remove, resolution/DPI, negative coords, off-screen,
+    //   4K/8K and opt-out combos. RESIDUAL RISK: real OS enumeration
+    //   (monitor hot-plug order, per-monitor DPI, taskbar insets) still needs
+    //   a real multi-monitor rig.
+    //
+    // Conventions: `monitor_fit(outer_pos, inner_size, monitor)` returns
+    // `(pos_cmd, size_cmd)`; `(None, None)` means "respect user placement".
+
+    #[test]
+    fn monitor_add_remove_matrix() {
+        // Single 1080p: normal placement is respected.
+        let primary = egui::vec2(1920.0, 1080.0);
+        assert_eq!(
+            monitor_fit(egui::pos2(100.0, 80.0), egui::vec2(1280.0, 800.0), primary),
+            (None, None)
+        );
+        // Second monitor to the right disconnected: a window that lived at
+        // x=2000 (fully on the removed secondary) recenters on primary.
+        // Center of 1920x1080 for 1280x800 is (320, 140).
+        assert_eq!(
+            monitor_fit(
+                egui::pos2(2000.0, 100.0),
+                egui::vec2(1280.0, 800.0),
+                primary
+            ),
+            (Some(egui::pos2(320.0, 140.0)), None)
+        );
+        // Adding a monitor does not disturb a window already visible.
+        assert_eq!(
+            monitor_fit(egui::pos2(100.0, 80.0), egui::vec2(1100.0, 750.0), primary),
+            (None, None)
+        );
+        // Secondary to the left disconnected: fully-left window recenters.
+        assert!(monitor_fit(
+            egui::pos2(-2000.0, 100.0),
+            egui::vec2(1280.0, 800.0),
+            primary
+        )
+        .0
+        .is_some());
+    }
+
+    #[test]
+    fn resolution_dpi_change_matrix() {
+        // 1080p -> laptop 1366x768: 1280x800 window needs height clamp only;
+        // position (100,80) stays visible so no move.
+        let laptop = egui::vec2(1366.0, 768.0);
+        assert_eq!(
+            monitor_fit(egui::pos2(100.0, 80.0), egui::vec2(1280.0, 800.0), laptop),
+            (None, Some(egui::vec2(1280.0, 768.0)))
+        );
+        // DPI scale simulated as smaller effective monitor (150% on 1080p ->
+        // 1280x720 points): same window clamps to 1280x720.
+        let hidpi = egui::vec2(1280.0, 720.0);
+        assert_eq!(
+            monitor_fit(egui::pos2(0.0, 0.0), egui::vec2(1280.0, 800.0), hidpi),
+            (None, Some(egui::vec2(1280.0, 720.0)))
+        );
+        // Resolution increase (1080p -> 1440p 2560x1440): existing placement
+        // still fits, no correction.
+        let larger = egui::vec2(2560.0, 1440.0);
+        assert_eq!(
+            monitor_fit(egui::pos2(100.0, 80.0), egui::vec2(1280.0, 800.0), larger),
+            (None, None)
+        );
+    }
+
+    #[test]
+    fn negative_coords_partial_overlap_matrix() {
+        let monitor = egui::vec2(1920.0, 1080.0);
+        // Partial overlap from the left/top is user intent: respect it.
+        assert_eq!(
+            monitor_fit(
+                egui::pos2(-500.0, -100.0),
+                egui::vec2(1280.0, 800.0),
+                monitor
+            ),
+            (None, None)
+        );
+        // Partial overlap from the right/bottom is also respected.
+        assert_eq!(
+            monitor_fit(
+                egui::pos2(1500.0, 800.0),
+                egui::vec2(1280.0, 800.0),
+                monitor
+            ),
+            (None, None)
+        );
+        // Fully left (secondary-left layout, x=-1920 col): recenter.
+        let (pos, _) = monitor_fit(egui::pos2(-1920.0, 0.0), egui::vec2(1280.0, 800.0), monitor);
+        assert!(pos.is_some());
+        // Negative Y fully above: recenter.
+        let (pos, _) = monitor_fit(
+            egui::pos2(100.0, -2000.0),
+            egui::vec2(1280.0, 800.0),
+            monitor,
+        );
+        assert!(pos.is_some());
+    }
+
+    #[test]
+    fn offscreen_restore_matrix() {
+        let monitor = egui::vec2(1920.0, 1080.0);
+        let size = egui::vec2(1280.0, 800.0);
+        // Far off-screen in every direction recenters to (320,140).
+        for pos in [
+            egui::pos2(5000.0, 5000.0),
+            egui::pos2(-5000.0, -5000.0),
+            egui::pos2(3000.0, -500.0),
+            egui::pos2(-3000.0, 2000.0),
+        ] {
+            assert_eq!(
+                monitor_fit(pos, size, monitor),
+                (Some(egui::pos2(320.0, 140.0)), None),
+                "pos {pos:?} must recenter"
+            );
+        }
+        // One-pixel visibility still counts as visible (respect).
+        assert_eq!(
+            monitor_fit(egui::pos2(-1279.0, 100.0), size, monitor),
+            (None, None)
+        );
+        assert_eq!(
+            monitor_fit(egui::pos2(1919.0, 100.0), size, monitor),
+            (None, None)
+        );
+    }
+
+    #[test]
+    fn uhd_4k_8k_matrix() {
+        // 4K: normal window fits, no correction.
+        let uhd = egui::vec2(3840.0, 2160.0);
+        assert_eq!(
+            monitor_fit(egui::pos2(100.0, 80.0), egui::vec2(1280.0, 800.0), uhd),
+            (None, None)
+        );
+        // 4K fullscreen-ish window fits exactly.
+        assert_eq!(
+            monitor_fit(egui::pos2(0.0, 0.0), egui::vec2(3840.0, 2160.0), uhd),
+            (None, None)
+        );
+        // Oversize on 4K clamps to monitor, position stays (visible).
+        assert_eq!(
+            monitor_fit(egui::pos2(0.0, 0.0), egui::vec2(5000.0, 3000.0), uhd),
+            (None, Some(egui::vec2(3840.0, 2160.0)))
+        );
+        // 8K: max window (7680x4320 = MAX_WINDOW_SIZE x 4320) fits.
+        let eight_k = egui::vec2(7680.0, 4320.0);
+        assert_eq!(
+            monitor_fit(egui::pos2(0.0, 0.0), egui::vec2(7680.0, 4320.0), eight_k),
+            (None, None)
+        );
+        // Beyond 8K clamps to 8K.
+        assert_eq!(
+            monitor_fit(egui::pos2(0.0, 0.0), egui::vec2(8000.0, 5000.0), eight_k),
+            (None, Some(egui::vec2(7680.0, 4320.0)))
+        );
+        // 8K window restored on 1080p laptop clamps to laptop.
+        let laptop = egui::vec2(1920.0, 1080.0);
+        assert_eq!(
+            monitor_fit(egui::pos2(0.0, 0.0), egui::vec2(7680.0, 4320.0), laptop),
+            (None, Some(egui::vec2(1920.0, 1080.0)))
+        );
+    }
+
+    #[test]
+    fn restore_opt_out_combos_matrix() {
+        // Opt-out always yields defaults, even with off-screen/maximized/4K
+        // geometry saved.
+        for settings in [
+            ViewerSettings {
+                restore_window: false,
+                window_width: 1280,
+                window_height: 800,
+                window_x: Some(3000),
+                window_y: Some(100),
+                window_maximized: true,
+                ..ViewerSettings::default()
+            },
+            ViewerSettings {
+                restore_window: false,
+                window_width: 3840,
+                window_height: 2160,
+                window_x: Some(-2000),
+                window_y: Some(-500),
+                window_maximized: false,
+                ..ViewerSettings::default()
+            },
+            ViewerSettings {
+                restore_window: false,
+                window_width: 7680,
+                window_height: 4320,
+                window_x: None,
+                window_y: None,
+                window_maximized: true,
+                ..ViewerSettings::default()
+            },
+        ] {
+            let viewport = build_viewport(&settings);
+            assert_eq!(
+                viewport.inner_size,
+                Some(egui::vec2(
+                    DEFAULT_WINDOW_WIDTH as f32,
+                    DEFAULT_WINDOW_HEIGHT as f32
+                )),
+                "opt-out must ignore saved size"
+            );
+            assert_eq!(viewport.position, None);
+            assert_eq!(viewport.maximized, None);
+        }
+        // Opt-in with maximized still carries size+position (maximized flag
+        // wins at the OS level; the file keeps geometry for unmaximize).
+        let settings = ViewerSettings {
+            restore_window: true,
+            window_width: 1280,
+            window_height: 800,
+            window_x: Some(100),
+            window_y: Some(80),
+            window_maximized: true,
+            ..ViewerSettings::default()
+        };
+        let viewport = build_viewport(&settings);
+        assert_eq!(viewport.inner_size, Some(egui::vec2(1280.0, 800.0)));
+        assert_eq!(viewport.position, Some(egui::pos2(100.0, 80.0)));
+        assert_eq!(viewport.maximized, Some(true));
+    }
 }
