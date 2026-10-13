@@ -4,6 +4,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static SAVE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
+/// Windows sharing-violation (32) / access-denied (5) from concurrent
+/// `copy` vs `rename` on the same live file. Retryable with a short sleep;
+/// a persistent failure still returns an error (rename) or proceeds
+/// best-effort (backup copy, where the live file matters more).
+fn is_retryable_share(error: &std::io::Error) -> bool {
+    matches!(error.raw_os_error(), Some(32) | Some(5))
+}
+
 /// How the image is drawn when magnified past its source pixels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ZoomQuality {
@@ -165,10 +173,35 @@ impl ViewerSettings {
             file.sync_all()?;
             drop(file);
             // Keep a copy of the last readable settings for recovery.
+            // Best-effort under concurrency: retry briefly on sharing
+            // violation, then proceed even if the copy failed (the live
+            // file matters more; single-threaded saves always copy).
             if path.is_file() {
-                std::fs::copy(path, path.with_extension("bak"))?;
+                let bak = path.with_extension("bak");
+                for attempt in 0..10u32 {
+                    match std::fs::copy(path, &bak) {
+                        Ok(_) => break,
+                        Err(error) if is_retryable_share(&error) && attempt + 1 < 10 => {
+                            std::thread::sleep(std::time::Duration::from_millis(1));
+                        }
+                        Err(_) => break,
+                    }
+                }
             }
-            std::fs::rename(&temp, path)
+            // Atomic commit: retry on Windows sharing violation from
+            // concurrent readers/writers (copy vs rename racing).
+            for attempt in 0..20u32 {
+                match std::fs::rename(&temp, path) {
+                    Ok(()) => return Ok(()),
+                    Err(error) if is_retryable_share(&error) && attempt + 1 < 20 => {
+                        std::thread::sleep(std::time::Duration::from_millis(
+                            1 + u64::from(attempt),
+                        ));
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            Ok(())
         })();
         if result.is_err() {
             std::fs::remove_file(&temp).ok();
