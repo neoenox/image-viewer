@@ -359,8 +359,8 @@ mod tests {
     fn tracked_window_state_and_unknown_keys_persist_together() {
         // Integration (#57 x #46): a frame updates the tracked geometry and
         // the flush writes it without dropping future keys from the file.
-        let dir = std::env::temp_dir()
-            .join(format!("image-viewer-wininteg-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("image-viewer-wininteg-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("settings.txt");
         std::fs::write(
