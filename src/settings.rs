@@ -283,11 +283,20 @@ mod tests {
             restore_window: false,
             unknown: Vec::new(),
         };
+        // Regression: a stale same-PID file from another save must never be
+        // truncated. Each save now writes its own unique temporary pathname.
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let stale = path.with_extension(format!("tmp.{}", std::process::id()));
+        std::fs::write(&stale, "stale-settings").unwrap();
         changed.save(&path).unwrap();
         assert_eq!(ViewerSettings::load(&path), changed);
         assert!(std::fs::read_to_string(&path)
             .unwrap()
             .starts_with("version=1\n"));
+        // Old-scheme litter (`tmp.<pid>`, no sequence) lives in a different
+        // namespace than current temp names and is left untouched.
+        assert_eq!(std::fs::read_to_string(&stale).unwrap(), "stale-settings");
+        std::fs::remove_file(&stale).unwrap();
         // The save is atomic: no temp file of this process is left behind.
         // (Temp names carry a per-save sequence suffix, so scan the dir.)
         let stray: Vec<_> = std::fs::read_dir(dir.join("nested"))
