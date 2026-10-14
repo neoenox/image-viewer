@@ -368,6 +368,31 @@ mod tests {
     }
 
     #[test]
+    fn unicode_and_spaced_paths_round_trip() {
+        // Japanese, spaces and parens in the directory: save/load must work
+        // byte-identically (Windows user profiles commonly contain these).
+        let dir = std::env::temp_dir().join(format!(
+            "画像ビューアー設定 (白) {}-{}",
+            std::process::id(),
+            SAVE_SEQUENCE.load(Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.txt");
+        let changed = ViewerSettings {
+            hover_pan: false,
+            zoom_quality: ZoomQuality::Sharp,
+            ..ViewerSettings::default()
+        };
+        changed.save(&path).unwrap();
+        assert_eq!(ViewerSettings::load(&path), changed);
+        let first = std::fs::read(&path).unwrap();
+        changed.save(&path).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), first);
+        assert!(path.with_extension("bak").is_file());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
     fn save_heals_stale_temp_file() {
         let dir = std::env::temp_dir().join(format!(
             "viewer-settings-stale-{}-{}",
