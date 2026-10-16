@@ -26,11 +26,15 @@ fn decode_image_with_budget_and_format(
     let mut reader = image::ImageReader::open(path)?.with_guessed_format()?;
     let format = reader.format();
     let mut limits = image::Limits::default();
-    limits.max_alloc = Some(DECODE_BUDGET);
+    // The caller's budget governs allocation, so a tighter budget (e.g. the
+    // 128 MiB detail source) is enforced at the decoder, not only by the
+    // pre-decode pixel check below.
+    limits.max_alloc = Some(max_rgba_bytes);
     reader.limits(limits);
     let mut decoder = reader.into_decoder()?;
     let (w, h) = image::ImageDecoder::dimensions(&decoder);
-    // Includes formats whose decoder only partially supports allocation limits.
+    // Includes formats whose decoder only partially supports allocation limits:
+    // reject sources whose 16-bit form would exceed the global decode ceiling.
     if u64::from(w) * u64::from(h) * 8 > DECODE_BUDGET
         || u64::from(w) * u64::from(h) * 4 > max_rgba_bytes
     {
@@ -123,6 +127,19 @@ mod tests {
         image::RgbaImage::new(32, 32).save(&path).unwrap();
         assert!(decode_image_with_pixel_budget(&path, 32 * 32 * 4 - 1).is_err());
         assert!(decode_image_with_pixel_budget(&path, 32 * 32 * 4).is_ok());
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn decoder_allocation_limit_follows_the_requested_budget() {
+        let path = std::env::temp_dir().join(format!("iv-budget-tight-{}.png", std::process::id()));
+        image::RgbaImage::new(64, 64).save(&path).unwrap();
+        let exact = 64 * 64 * 4;
+        // A budget exactly equal to the RGBA size must still decode: the
+        // decoder's allocation limit now matches the caller's budget rather
+        // than the looser global ceiling.
+        assert!(decode_image_with_pixel_budget(&path, exact).is_ok());
+        assert!(decode_image_with_pixel_budget(&path, exact - 1).is_err());
         std::fs::remove_file(path).unwrap();
     }
 
