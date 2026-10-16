@@ -40,13 +40,20 @@ function Check([string]$name, [string]$path, [string]$version) {
     $problems.Add($name)
 }
 
+# Probe a tool's version only when it was resolved; calling `& $null` would
+# emit a stray "cannot bind argument" error before the clean MISSING line.
+function Get-ToolVersion([string]$tool) {
+    if (-not $tool) { return $null }
+    return (& $tool --version 2>&1)
+}
+
 Write-Output '== Rust toolchain =='
 $rustc = Resolve-Tool 'rustc' $extraDirs
 $cargo = Resolve-Tool 'cargo' $extraDirs
 $rustup = Resolve-Tool 'rustup' $extraDirs
-Check 'rustc' $rustc (& $rustc --version 2>&1) 
-Check 'cargo' $cargo (& $cargo --version 2>&1) 
-Check 'rustup' $rustup (& $rustup --version 2>&1) 
+Check 'rustc' $rustc (Get-ToolVersion $rustc)
+Check 'cargo' $cargo (Get-ToolVersion $cargo)
+Check 'rustup' $rustup (Get-ToolVersion $rustup)
 
 if ($cargo -and -not (Get-Command cargo -ErrorAction SilentlyContinue)) {
     $notes.Add("cargo is at $cargo but not on PATH; add $cargoDir to PATH for plain 'cargo' to work")
