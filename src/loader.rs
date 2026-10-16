@@ -1,4 +1,6 @@
-use crate::imaging::{decode_image, downscale_to_cap, rotate_rgba};
+use crate::imaging::{
+    decode_image_with_format, decode_image_with_pixel_budget, downscale_to_cap, rotate_rgba,
+};
 use crate::sync::{catch_panic, wait_recover, LockRecover};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -20,6 +22,9 @@ const FAILED_RETRY: Duration = Duration::from_secs(5);
 
 // Holds the five-image keep window (current ±2) at the 2048px cap (16MB each).
 pub(crate) const CACHE_BUDGET: usize = 80 * 1024 * 1024;
+/// Full-resolution detail source is separate from the thumbnail cache.
+/// Bound its single retained RGBA buffer to at most 128 MiB.
+const DETAIL_SOURCE_RGBA_BUDGET: u64 = 128 * 1024 * 1024;
 #[derive(Clone)]
 pub struct CachedImage {
     pub rgba: Arc<image::RgbaImage>,
@@ -358,14 +363,9 @@ fn load((path, cap): &Key) -> Result<CachedImage, String> {
             .entry(path.clone())
             .or_insert(0) += 1;
     }
-    let mut reader = image::ImageReader::open(path)
-        .map_err(|e| e.to_string())?
-        .with_guessed_format()
-        .map_err(|e| e.to_string())?;
-    let gif = reader.format() == Some(image::ImageFormat::Gif);
-    // Explicit format fallback follows ImageReader's extension handling.
-    reader.limits(image::Limits::default());
-    let image = decode_image(path).map_err(|e| e.to_string())?;
+    // Reuse the same ImageReader for format detection and decode (no double open/TOCTOU).
+    let (image, format) = decode_image_with_format(path).map_err(|e| e.to_string())?;
+    let gif = format == Some(image::ImageFormat::Gif);
     let orig = (image.width(), image.height());
     let rgba = Arc::new(downscale_to_cap(image.into_rgba8(), (*cap).min(2048))?);
     Ok(CachedImage { rgba, orig, gif })
@@ -399,7 +399,9 @@ fn detail_source(
     Ok(image)
 }
 fn decode_detail_source(path: &Path, rotation: u8) -> Result<image::RgbaImage, String> {
-    let image = decode_image(path).map_err(|e| e.to_string())?.into_rgba8();
+    let image = decode_image_with_pixel_budget(path, DETAIL_SOURCE_RGBA_BUDGET)
+        .map_err(|e| e.to_string())?
+        .into_rgba8();
     Ok(if rotation == 0 {
         image
     } else {
@@ -514,6 +516,56 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
         assert!(loader.shared.0.lock_recover().active.is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn repeated_navigation_over_large_images_stays_within_budget() {
+        // Acceptance guard (#48): continuous switching must not grow memory.
+        // 8 images x 2048x1536 (~12 MiB each) exceed the 80 MiB budget, so
+        // eviction runs every round; usage must stay bounded, not creep up.
+        let dir = std::env::temp_dir().join(format!("viewer-navbudget-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let paths: Vec<PathBuf> = (0..8)
+            .map(|i| {
+                let path = dir.join(format!("big-{i}.png"));
+                image::RgbaImage::from_fn(2048, 1536, |x, y| {
+                    image::Rgba([(x % 251) as u8, (y % 251) as u8, i as u8, 255])
+                })
+                .save(&path)
+                .unwrap();
+                path
+            })
+            .collect();
+        let loader = ImageLoader::new();
+        let start = std::time::Instant::now();
+        let mut peaks = Vec::new();
+        for round in 0..3u64 {
+            for (i, path) in paths.iter().enumerate() {
+                let generation = round * 8 + i as u64 + 1;
+                loader.select(generation, path.clone(), 2048);
+                loop {
+                    if let Some((gen, result)) = loader.poll() {
+                        assert_eq!(gen, generation);
+                        assert!(result.is_ok(), "round {round} image {i}");
+                        break;
+                    }
+                    assert!(start.elapsed() < std::time::Duration::from_secs(120));
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                }
+            }
+            let bytes = loader.shared.0.lock_recover().bytes;
+            println!("BENCH nav round {round}: cache {} KiB", bytes / 1024);
+            peaks.push(bytes);
+        }
+        let state = loader.shared.0.lock_recover();
+        assert!(
+            state.bytes <= CACHE_BUDGET,
+            "cache {} exceeds budget {}",
+            state.bytes,
+            CACHE_BUDGET
+        );
+        assert!(peaks[2] <= peaks[0], "cache grew across rounds: {peaks:?}");
+        assert!(state.active.is_empty());
         std::fs::remove_dir_all(dir).unwrap();
     }
     #[test]
@@ -796,9 +848,18 @@ mod bench {
         v.sort_by(|a, b| a.partial_cmp(b).unwrap());
         v[v.len() / 2]
     }
+    /// Benches target release (the `perf` CI job); debug is ~20x slower, so the
+    /// ceiling is scaled there to avoid false failures on an accidental debug run.
+    fn budget(release_ms: f64) -> f64 {
+        if cfg!(debug_assertions) {
+            release_ms * 20.0
+        } else {
+            release_ms
+        }
+    }
 
     #[test]
-    #[ignore]
+    #[ignore = "perf gate: run in the release `perf` CI job (cargo test --release -- --ignored bench::)"]
     fn navigation_latency() {
         let dir = std::env::temp_dir().join(format!("viewer-bench-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -944,6 +1005,28 @@ mod bench {
             }
         }
 
+        // Coarse ceilings only. These medians include worker-thread wakeups,
+        // temp-file I/O and OS scheduling, so they are smoke gates for gross
+        // regressions (a hang, or re-decoding full-res per pan step), not
+        // latency SLOs. 8 s is ~90x the slowest measured stage (~85 ms).
+        for (label, samples, ceiling_ms) in [
+            ("cold", &cold, 8_000.0),
+            ("warm", &warm, 8_000.0),
+            ("during detail decode", &busy, 8_000.0),
+            ("during preload decode", &preload_busy, 8_000.0),
+            ("pan first region", &first, 8_000.0),
+            ("pan later regions", &later, 8_000.0),
+            ("thumbnails", &thumbs, 8_000.0),
+            ("gif first frame", &gif_first, 8_000.0),
+        ] {
+            let m = median(samples.clone());
+            assert!(
+                m < budget(ceiling_ms),
+                "navigation {label} median {m:.0} ms exceeded budget {:.0} ms",
+                budget(ceiling_ms)
+            );
+        }
+
         let fmt = |v: &[f64]| {
             v.iter()
                 .map(|x| format!("{x:.0}"))
@@ -994,11 +1077,17 @@ mod bench {
     }
 
     #[test]
-    #[ignore]
+    #[ignore = "perf gate: run in the release `perf` CI job (cargo test --release -- --ignored bench::)"]
     fn prune_many_entries_reports_median() {
         // 8x8 tiles: 50000 entries ~ 13 MiB, well under the byte budget, so
         // this measures the keep-set logic rather than budget eviction.
-        for &(cached, kept) in &[(20_000usize, 10_000usize), (50_000, 25_000)] {
+        // Ceilings are ~50-70x the measured release medians (20k ~30 ms,
+        // 50k ~80 ms); the `cache.len()` assert below is the correctness gate.
+        let mut medians = Vec::new();
+        for &(cached, kept, ceiling_ms) in &[
+            (20_000usize, 10_000usize, 2_500.0f64),
+            (50_000, 25_000, 6_000.0),
+        ] {
             let mut times = Vec::new();
             for _ in 0..3 {
                 let loader = ImageLoader::new();
@@ -1029,10 +1118,18 @@ mod bench {
                 times.push(start.elapsed().as_secs_f64() * 1000.0);
                 assert_eq!(loader.shared.0.lock_recover().cache.len(), kept);
             }
-            println!(
-                "BENCH prune {cached} cached / {kept} kept: median {:.1} ms",
-                median(times)
+            let m = median(times);
+            println!("BENCH prune {cached} cached / {kept} kept: median {m:.1} ms");
+            assert!(
+                m < budget(ceiling_ms),
+                "prune {cached}->{kept} median {m:.1} ms exceeded budget {:.0} ms",
+                budget(ceiling_ms)
             );
+            medians.push(m);
         }
+        // 2.5x entries should stay roughly linear; an 8x cap catches a blow-up.
+        let ratio = medians[1] / medians[0].max(1.0);
+        println!("BENCH prune scaling 50k/20k: {ratio:.2}x");
+        assert!(ratio < 8.0, "prune scaling regressed to {ratio:.2}x");
     }
 }
