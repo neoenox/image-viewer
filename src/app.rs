@@ -144,6 +144,12 @@ pub struct ViewerApp {
     pub(crate) thumb_retained: std::collections::HashSet<PathBuf>,
     pub(crate) show_assoc: bool,
     pub(crate) assoc_status: Vec<(String, bool)>,
+    /// Last time the tracked window size was written to disk. Writes are
+    /// throttled so interactive resizing does not rewrite the file every
+    /// frame; the final size is flushed on close (see `track_window_size`).
+    pub(crate) last_window_save: Instant,
+    /// Whether the startup monitor-fit check ran (see `window_state`).
+    pub(crate) startup_fit_done: bool,
 }
 
 /// 中ボタン押下中の等倍覗き見（ルーペ）用に退避する表示状態。
@@ -208,6 +214,8 @@ impl ViewerApp {
             thumb_retained: std::collections::HashSet::new(),
             show_assoc: false,
             assoc_status: Vec::new(),
+            last_window_save: Instant::now(),
+            startup_fit_done: false,
         };
         if let Some(p) = initial {
             if p.is_dir() {
@@ -329,11 +337,11 @@ impl ViewerApp {
             }
         }
         if self.anim_due.is_some_and(|due| Instant::now() >= due) {
-            if let Some(frame) = self.animation.as_ref().and_then(|a| a.poll()) {
+            if let Some(frame) = self.animation.as_mut().and_then(|a| a.poll()) {
                 match frame {
                     Ok(frame) => {
                         self.anim_frame = frame.index;
-                        self.anim_total = frame.total.max(frame.index + 1);
+                        self.anim_total = frame.total.unwrap_or(0).max(frame.index + 1);
                         self.base = Some(std::sync::Arc::new(frame.rgba));
                         self.anim_due = Some(Instant::now() + frame.delay);
                         self.rebuild_texture(ctx);
@@ -976,11 +984,10 @@ pub fn run() -> eframe::Result<()> {
     if let Some(path) = &app.settings_path {
         app.settings = crate::settings::ViewerSettings::load(path);
     }
+    // 前回のウィンドウ状態（サイズ・位置・最大化）で開く。
+    // 復元OFF・初回・不正値は既定ジオメトリ（詳細は window_state を参照）。
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1100.0, 750.0])
-            .with_min_inner_size([640.0, 480.0])
-            .with_drag_and_drop(true),
+        viewport: crate::window_state::build_viewport(&app.settings),
         ..Default::default()
     };
     eframe::run_native(

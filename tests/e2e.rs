@@ -9,6 +9,42 @@ use image_viewer::{
     collect_siblings, decode_image, is_supported, setup_jp_font, ViewerApp, PEEK_MAGNIFICATION,
 };
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+
+/// 単色画像を書き出す（JPEGはアルファ非対応のためRGBへ変換）。
+fn solid(path: &Path, w: u32, h: u32, px: image::Rgba<u8>) {
+    let buf = image::RgbaImage::from_pixel(w, h, px);
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if ext == "jpg" || ext == "jpeg" {
+        // JPEGはアルファ非対応のためRGBに変換
+        image::DynamicImage::ImageRgba8(buf)
+            .to_rgb8()
+            .save(path)
+            .unwrap();
+    } else {
+        buf.save(path).unwrap();
+    }
+}
+
+/// 3000x2000 の巨大JPEG。エンコードが重いのでプロセス内で一度だけ生成し、
+/// 各フィクスチャへはコピーする（#43: 巨大画像fixtureの共有化）。
+fn shared_big_jpeg() -> &'static Path {
+    static BIG: OnceLock<PathBuf> = OnceLock::new();
+    BIG.get_or_init(|| {
+        let dir =
+            std::env::temp_dir().join(format!("image-viewer-e2e-shared-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("z-big.jpg");
+        if !path.exists() {
+            solid(&path, 3000, 2000, image::Rgba([120, 120, 120, 255]));
+        }
+        path
+    })
+}
 
 /// テストごとに独立したフィクスチャフォルダを作る。tagで並列実行時の衝突を避ける。
 fn fixture_dir(tag: &str) -> PathBuf {
@@ -18,23 +54,6 @@ fn fixture_dir(tag: &str) -> PathBuf {
     }
     std::fs::create_dir_all(&dir).unwrap();
 
-    fn solid(path: &Path, w: u32, h: u32, px: image::Rgba<u8>) {
-        let buf = image::RgbaImage::from_pixel(w, h, px);
-        let ext = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("")
-            .to_ascii_lowercase();
-        if ext == "jpg" || ext == "jpeg" {
-            // JPEGはアルファ非対応のためRGBに変換
-            image::DynamicImage::ImageRgba8(buf)
-                .to_rgb8()
-                .save(path)
-                .unwrap();
-        } else {
-            buf.save(path).unwrap();
-        }
-    }
     use image::Rgba;
     // 名前順ソートで決定的な並びになるよう命名
     solid(&dir.join("a.png"), 100, 80, Rgba([200, 30, 30, 255]));
@@ -57,13 +76,8 @@ fn fixture_dir(tag: &str) -> PathBuf {
     std::fs::write(dir.join("d.png"), b"not an image at all").unwrap();
     // 未対応拡張子（一覧から除外される）
     std::fs::write(dir.join("e.txt"), b"hello").unwrap();
-    // テクスチャ上限(2048)超えの巨大画像。jpgで保存して高速化。
-    solid(
-        &dir.join("z-big.jpg"),
-        3000,
-        2000,
-        Rgba([120, 120, 120, 255]),
-    );
+    // テクスチャ上限(2048)超えの巨大画像。共有生成したJPEGをコピーして高速化。
+    std::fs::copy(shared_big_jpeg(), dir.join("z-big.jpg")).unwrap();
     dir
 }
 
@@ -161,7 +175,12 @@ fn oversized_image_fits_texture_limit() {
     assert!(app.has_texture());
     let [w, h] = app.texture_size().unwrap();
     assert!(w <= 2048 && h <= 2048, "texture was {w}x{h}");
-    assert_eq!((w, h), (2048, 1365));
+    // 厳密値ではなく元画像の縦横比で検証し、リサンプル実装の変更に耐える（#43）。
+    let ratio = w as f64 / h as f64;
+    assert!(
+        (ratio - 3000.0 / 2000.0).abs() < 0.01,
+        "aspect ratio for {w}x{h} drifted from 3:2"
+    );
     // 元画像サイズの記録はフル解像度のまま
     assert_eq!(app.image_dims(), Some((3000, 2000)));
     cleanup(&dir);
@@ -420,6 +439,7 @@ fn numeric_filenames_sort_naturally() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+#[cfg(windows)]
 #[test]
 fn assoc_register_status_unregister() {
     use image_viewer::assoc;
@@ -445,7 +465,6 @@ fn assoc_register_status_unregister() {
     key.set_value("ProgId", &"Original.App").unwrap();
     key.set_value("Hash", &"OriginalHash").unwrap();
     let exe = std::env::current_exe().unwrap();
-    let exe_name = exe.file_name().unwrap().to_str().unwrap();
     let check = || {
         assert_eq!(
             hkcu.open_subkey(&classes)
@@ -481,7 +500,7 @@ fn assoc_register_status_unregister() {
         assoc::register(prog, app, caps, &exe, &[ext, absent_ext]).unwrap();
         check();
     }
-    assoc::unregister(prog, app, caps, exe_name).unwrap();
+    assoc::unregister(prog, app, caps, &exe).unwrap();
     check();
     assert!(hkcu
         .open_subkey(format!(r"Software\Classes\{prog}"))
@@ -709,4 +728,55 @@ fn rapid_navigation_applies_only_latest_image() {
     assert_eq!(app.image_dims(), Some((40, 30)));
     assert_eq!(app.texture_size(), Some([40, 30]));
     cleanup(&dir);
+}
+
+// Windows-only CLI output for the PS wrappers: the non-Windows mirror
+// reports Unsupported (exit 1), so this runs on Windows only, like the
+// registry round-trip test above.
+#[cfg(windows)]
+#[test]
+fn print_assoc_config_reports_canonical_constants() {
+    // 実バイナリを子プロセス起動し、PSラッパー向け定数出力を検証する。
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_image-viewer"))
+        .arg("--print-assoc-config")
+        .output()
+        .expect("failed to run image-viewer --print-assoc-config");
+    assert!(
+        output.status.success(),
+        "exit status: {:?}",
+        output.status.code()
+    );
+    let text = String::from_utf8(output.stdout).expect("config must be UTF-8");
+    let mut config = std::collections::HashMap::new();
+    for line in text.lines() {
+        let Some((key, value)) = line.split_once('=') else {
+            panic!("malformed config line: {line:?}");
+        };
+        config.insert(key.to_owned(), value.to_owned());
+    }
+    assert_eq!(config.get("format").map(String::as_str), Some("1"));
+    assert_eq!(
+        config.get("prog_id").map(String::as_str),
+        Some(image_viewer::assoc::PROG_ID)
+    );
+    assert_eq!(
+        config.get("app_name").map(String::as_str),
+        Some(image_viewer::assoc::APP_NAME)
+    );
+    assert_eq!(
+        config.get("caps_base").map(String::as_str),
+        Some(image_viewer::assoc::CAPS_BASE)
+    );
+    let app_exe = config.get("app_exe").expect("app_exe missing");
+    assert!(
+        app_exe.eq_ignore_ascii_case("image-viewer.exe"),
+        "app_exe: {app_exe}"
+    );
+    let exts: Vec<&str> = config
+        .get("exts")
+        .expect("exts missing")
+        .split(',')
+        .collect();
+    assert!(exts.contains(&"jpg") && exts.contains(&"png") && exts.contains(&"gif"));
+    assert_eq!(exts.len(), image_viewer::SUPPORTED_EXTS.len());
 }
