@@ -3,6 +3,14 @@ use crate::{assoc, SUPPORTED_EXTS};
 use eframe::egui;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
+
+/// Width of the left thumbnail-list side panel, in points. Shared with the input
+/// layer so the wheel-navigation dead zone matches the visible panel exactly.
+pub(crate) const THUMBNAIL_PANEL_WIDTH: f32 = 156.0;
+
+/// Pointer distance from the top edge that reveals the auto-hidden toolbar.
+const TOOLBAR_REVEAL_ZONE: f32 = 48.0;
+
 impl eframe::App for ViewerApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         crate::win_icon::apply(frame);
@@ -38,7 +46,11 @@ impl eframe::App for ViewerApp {
         }
 
         // ---- ツールバー ----
-        let near_top = ctx.input(|i| i.pointer.hover_pos().is_some_and(|p| p.y < 48.0));
+        let near_top = ctx.input(|i| {
+            i.pointer
+                .hover_pos()
+                .is_some_and(|p| p.y < TOOLBAR_REVEAL_ZONE)
+        });
         if !self.settings.auto_hide_toolbar
             || self.toolbar_pinned
             || near_top
@@ -529,7 +541,7 @@ impl ViewerApp {
         let mut selected = None;
         let mut visible = Vec::new();
         egui::SidePanel::left("thumbnails")
-            .exact_width(156.0)
+            .exact_width(THUMBNAIL_PANEL_WIDTH)
             .resizable(false)
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
