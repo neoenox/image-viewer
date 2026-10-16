@@ -44,7 +44,7 @@ fn mirror_sanitize_matches_windows_rules() {
     assert_eq!(mirror::sanitize_ext(r"a\b"), None);
     assert_eq!(mirror::sanitize_ext("jp g"), None);
     assert_eq!(mirror::sanitize_ext("jp-g"), None);
-    assert_eq!(mirror::sanitize_ext("é"), None);
+    assert_eq!(mirror::sanitize_ext("\u{e9}"), None);
     // Invalid extensions are never default, mirroring the Windows guard.
     assert!(!mirror::is_default("a/b", mirror::PROG_ID));
     assert!(!mirror::is_default("", mirror::PROG_ID));
@@ -55,7 +55,7 @@ fn mirror_sanitize_matches_windows_rules() {
 fn mirror_sanitize_parity_with_windows_assoc() {
     // The mirror must stay in lockstep with the real Windows implementation.
     for ext in [
-        "jpg", ".JPG", "  tif ", "jpeg2000", "", ".", "a/b", r"a\b", "jp g", "jp-g", "é",
+        "jpg", ".JPG", "  tif ", "jpeg2000", "", ".", "a/b", r"a\b", "jp g", "jp-g", "\u{e9}",
     ] {
         assert_eq!(
             mirror::sanitize_ext(ext),

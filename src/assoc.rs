@@ -198,7 +198,7 @@ mod tests {
         assert_eq!(sanitize_ext(r"a\b"), None);
         assert_eq!(sanitize_ext("jp g"), None);
         assert_eq!(sanitize_ext("jp-g"), None);
-        assert_eq!(sanitize_ext("é"), None);
+        assert_eq!(sanitize_ext("\u{e9}"), None);
         assert!(!is_default("a/b", PROG_ID));
     }
 

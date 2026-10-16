@@ -52,29 +52,108 @@ pub(crate) fn build_viewport(settings: &ViewerSettings) -> egui::ViewportBuilder
 /// 保存ジオメトリが現モニターに収まるか判定し、収まらない場合の
 /// (OuterPosition, InnerSize) 補正値を返す。不要なら (None, None)。
 /// 部分的に重なっている配置はユーザーの意図として尊重し、補正しない。
-pub(crate) fn monitor_fit(
+#[cfg(test)]
+fn monitor_fit(
     outer_pos: egui::Pos2,
     inner_size: egui::Vec2,
     monitor: egui::Vec2,
 ) -> (Option<egui::Pos2>, Option<egui::Vec2>) {
-    if !monitor.x.is_finite() || !monitor.y.is_finite() || monitor.x <= 0.0 || monitor.y <= 0.0 {
+    fit_monitor_bounds(
+        outer_pos,
+        inner_size,
+        egui::Rect::from_min_size(egui::Pos2::ZERO, monitor),
+    )
+}
+
+fn fit_monitor_bounds(
+    outer_pos: egui::Pos2,
+    inner_size: egui::Vec2,
+    bounds: egui::Rect,
+) -> (Option<egui::Pos2>, Option<egui::Vec2>) {
+    if !bounds.is_finite() || !bounds.is_positive() {
         return (None, None);
     }
-    let size = egui::vec2(inner_size.x.min(monitor.x), inner_size.y.min(monitor.y));
+    let size = inner_size.min(bounds.size());
     let size_cmd = (size != inner_size).then_some(size);
-    let visible = outer_pos.x < monitor.x
-        && outer_pos.y < monitor.y
-        && outer_pos.x + size.x > 0.0
-        && outer_pos.y + size.y > 0.0;
+    let visible = outer_pos.x < bounds.max.x
+        && outer_pos.y < bounds.max.y
+        && outer_pos.x + size.x > bounds.min.x
+        && outer_pos.y + size.y > bounds.min.y;
     let pos_cmd = if visible {
         None
     } else {
-        Some(egui::pos2(
-            ((monitor.x - size.x) / 2.0).max(0.0),
-            ((monitor.y - size.y) / 2.0).max(0.0),
-        ))
+        Some(bounds.min + (bounds.size() - size) / 2.0)
     };
     (pos_cmd, size_cmd)
+}
+
+/// Windows reports desktop-global physical coordinates. Convert both the
+/// window and the selected monitor using the viewport's current scale, just
+/// as egui-winit does for inner_rect/outer_rect. MonitorFromRect selects a
+/// connected monitor (nearest when the saved monitor was disconnected).
+#[cfg(windows)]
+fn native_monitor_bounds(outer: egui::Rect, pixels_per_point: f32) -> Option<egui::Rect> {
+    use std::ffi::c_void;
+    #[repr(C)]
+    #[derive(Clone, Copy, Default)]
+    struct Rect {
+        left: i32,
+        top: i32,
+        right: i32,
+        bottom: i32,
+    }
+    #[repr(C)]
+    struct MonitorInfo {
+        size: u32,
+        monitor: Rect,
+        work: Rect,
+        flags: u32,
+    }
+    #[link(name = "user32")]
+    extern "system" {
+        fn MonitorFromRect(rect: *const Rect, flags: u32) -> *mut c_void;
+        fn GetMonitorInfoW(monitor: *mut c_void, info: *mut MonitorInfo) -> i32;
+    }
+    if !outer.is_finite()
+        || !outer.is_positive()
+        || !pixels_per_point.is_finite()
+        || pixels_per_point <= 0.0
+    {
+        return None;
+    }
+    let physical = outer * pixels_per_point;
+    let rect = Rect {
+        left: physical.min.x.round() as i32,
+        top: physical.min.y.round() as i32,
+        right: physical.max.x.round() as i32,
+        bottom: physical.max.y.round() as i32,
+    };
+    let mut info = MonitorInfo {
+        size: std::mem::size_of::<MonitorInfo>() as u32,
+        monitor: Rect::default(),
+        work: Rect::default(),
+        flags: 0,
+    };
+    // SAFETY: both pointers reference live, correctly sized Win32 structs.
+    // MONITOR_DEFAULTTONEAREST (2) also handles disconnected saved screens.
+    unsafe {
+        let monitor = MonitorFromRect(&rect, 2);
+        if monitor.is_null() || GetMonitorInfoW(monitor, &mut info) == 0 {
+            return None;
+        }
+    }
+    let work = info.work;
+    Some(
+        egui::Rect::from_min_max(
+            egui::pos2(work.left as f32, work.top as f32),
+            egui::pos2(work.right as f32, work.bottom as f32),
+        ) / pixels_per_point,
+    )
+}
+
+#[cfg(not(windows))]
+fn native_monitor_bounds(_outer: egui::Rect, _pixels_per_point: f32) -> Option<egui::Rect> {
+    None
 }
 
 impl ViewerApp {
@@ -90,11 +169,17 @@ impl ViewerApp {
         let before = self.settings.clone();
         self.update_window_state(snapshot);
         self.fit_to_monitor_once(ctx, snapshot);
-        if self.settings != before
+        self.window_state_dirty |= self.settings != before;
+        if self.window_state_dirty
             && (snapshot.close_requested
                 || self.last_window_save.elapsed() >= Duration::from_secs(2))
         {
             self.flush_settings();
+        }
+        if self.window_state_dirty {
+            ctx.request_repaint_after(
+                Duration::from_secs(2).saturating_sub(self.last_window_save.elapsed()),
+            );
         }
     }
 
@@ -153,11 +238,24 @@ impl ViewerApp {
         if self.startup_fit_done {
             return;
         }
+        if self.fullscreen || snapshot.fullscreen == Some(true) || snapshot.maximized == Some(true)
+        {
+            self.startup_fit_done = true;
+            return;
+        }
         let (Some(monitor), Some(inner)) = (snapshot.monitor, snapshot.inner) else {
             return; // 情報が揃うまで次フレーム以降に再試行
         };
-        let outer_pos = snapshot.outer.map(|rect| rect.min).unwrap_or(inner.min);
-        let (pos_cmd, size_cmd) = monitor_fit(outer_pos, inner.size(), monitor);
+        let outer = snapshot.outer.unwrap_or(inner);
+        let (pos_cmd, size_cmd) = match native_monitor_bounds(outer, ctx.pixels_per_point()) {
+            Some(bounds) => fit_monitor_bounds(outer.min, inner.size(), bounds),
+            // Size alone gives no monitor origin. Clamp size only; never
+            // relocate a window based on an assumed (0, 0) origin.
+            None => {
+                let size = inner.size().min(monitor);
+                (None, (size != inner.size()).then_some(size))
+            }
+        };
         if let Some(size) = size_cmd {
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
         }
@@ -173,8 +271,10 @@ impl ViewerApp {
         if let Some(path) = &self.settings_path {
             if let Err(error) = self.settings.save(path) {
                 self.status_msg = format!("設定を保存できませんでした: {error}");
+                return;
             }
         }
+        self.window_state_dirty = false;
     }
 }
 
@@ -182,6 +282,89 @@ impl ViewerApp {
 mod tests {
     use super::*;
     use crate::app::ViewerApp;
+
+    #[cfg(windows)]
+    #[test]
+    fn native_monitor_bounds_use_viewport_scale() {
+        let outer = egui::Rect::from_min_size(egui::pos2(100.0, 100.0), egui::vec2(800.0, 600.0));
+        let physical = native_monitor_bounds(outer, 1.0).expect("Windows monitor work area");
+        let scaled = native_monitor_bounds(outer / 2.0, 2.0).unwrap();
+        assert_eq!(scaled, physical / 2.0);
+        assert!(physical.is_positive());
+        assert_eq!(native_monitor_bounds(outer, 0.0), None);
+    }
+
+    #[test]
+    fn failed_window_save_retries_without_another_resize() {
+        let dir = std::env::temp_dir().join(format!("iv-window-retry-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let parent = dir.join("blocked");
+        std::fs::write(&parent, b"not a directory").unwrap();
+        let path = parent.join("settings.txt");
+        let ctx = egui::Context::default();
+        let mut app = ViewerApp::new(None);
+        app.settings_path = Some(path.clone());
+        app.last_window_save = Instant::now() - Duration::from_secs(3);
+        let info = window_info([10.0, 20.0], [1280.0, 800.0], false, false);
+        track_frame(&mut app, &ctx, info.clone());
+        assert!(app.window_state_dirty);
+        assert!(!path.exists());
+        std::fs::remove_file(parent).unwrap();
+        app.last_window_save = Instant::now() - Duration::from_secs(3);
+        track_frame(&mut app, &ctx, info);
+        assert!(!app.window_state_dirty);
+        assert_eq!(ViewerSettings::load(&path), app.settings);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn connected_secondary_monitors_preserve_window_positions() {
+        for origin in [
+            egui::pos2(1920.0, 0.0),
+            egui::pos2(-1920.0, 0.0),
+            egui::pos2(0.0, -1080.0),
+        ] {
+            let bounds = egui::Rect::from_min_size(origin, egui::vec2(1920.0, 1080.0));
+            let position = origin + egui::vec2(80.0, 100.0);
+            // Coordinates are desktop-global, not relative to this monitor.
+            assert_eq!(
+                fit_monitor_bounds(position, egui::vec2(1100.0, 750.0), bounds),
+                (None, None)
+            );
+        }
+        let bounds =
+            egui::Rect::from_min_size(egui::pos2(-1920.0, -1080.0), egui::vec2(1920.0, 1040.0));
+        assert_eq!(
+            fit_monitor_bounds(egui::pos2(4000.0, 100.0), egui::vec2(1100.0, 750.0), bounds),
+            (Some(egui::pos2(-1510.0, -935.0)), None)
+        );
+    }
+
+    #[test]
+    fn unchanged_geometry_flushes_after_throttle_and_on_close() {
+        for close in [false, true] {
+            let dir = std::env::temp_dir()
+                .join(format!("iv-final-window-{}-{close}", std::process::id()));
+            let path = dir.join("settings.txt");
+            let ctx = egui::Context::default();
+            let mut app = ViewerApp::new(None);
+            app.settings_path = Some(path.clone());
+            let info = window_info([10.0, 20.0], [1280.0, 800.0], false, false);
+            track_frame(&mut app, &ctx, info.clone());
+            assert!(!path.exists());
+            if !close {
+                app.last_window_save = Instant::now() - Duration::from_secs(3);
+            }
+            track_frame(
+                &mut app,
+                &ctx,
+                window_info([10.0, 20.0], [1280.0, 800.0], false, close),
+            );
+            assert_eq!(ViewerSettings::load(&path), app.settings);
+            assert!(path.exists());
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
 
     fn window_info(
         min: [f32; 2],
