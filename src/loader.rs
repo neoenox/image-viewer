@@ -25,6 +25,13 @@ pub(crate) const CACHE_BUDGET: usize = 80 * 1024 * 1024;
 /// Full-resolution detail source is separate from the thumbnail cache.
 /// Bound its single retained RGBA buffer to at most 128 MiB.
 const DETAIL_SOURCE_RGBA_BUDGET: u64 = 128 * 1024 * 1024;
+/// Largest decoded-edge length a caller may request. `load` clamps every request
+/// to this, so a mis-sized cap degrades to the supported size instead of
+/// silently over-allocating.
+const MAX_CAP: usize = 2048;
+/// A dropped loader waits at most this long for workers to stop, then detaches
+/// any that are still finishing a decode so shutdown can never hang.
+const JOIN_TIMEOUT: Duration = Duration::from_secs(2);
 #[derive(Clone)]
 pub struct CachedImage {
     pub rgba: Arc<image::RgbaImage>,
@@ -121,6 +128,9 @@ impl State {
 }
 pub struct ImageLoader {
     shared: Arc<(Mutex<State>, Condvar)>,
+    /// Worker threads, joined (bounded) on drop so a discarded loader never
+    /// leaves threads holding shared state.
+    handles: Vec<std::thread::JoinHandle<()>>,
 }
 impl Default for ImageLoader {
     fn default() -> Self {
@@ -140,12 +150,16 @@ impl ImageLoader {
     }
     fn with_workers(roles: &[Role]) -> Self {
         let shared = Arc::new((Mutex::new(State::default()), Condvar::new()));
-        for &role in roles {
-            Self::spawn_worker(&shared, role);
-        }
-        Self { shared }
+        let handles = roles
+            .iter()
+            .map(|&role| Self::spawn_worker(&shared, role))
+            .collect();
+        Self { shared, handles }
     }
-    fn spawn_worker(shared: &Arc<(Mutex<State>, Condvar)>, role: Role) {
+    fn spawn_worker(
+        shared: &Arc<(Mutex<State>, Condvar)>,
+        role: Role,
+    ) -> std::thread::JoinHandle<()> {
         let worker = shared.clone();
         std::thread::Builder::new()
             .name(
@@ -256,7 +270,7 @@ impl ImageLoader {
                     }
                 }
             })
-            .expect("image loader");
+            .expect("image loader")
     }
     pub(crate) fn select(&self, generation: u64, path: PathBuf, cap: usize) {
         let (lock, wake) = &*self.shared;
@@ -341,6 +355,17 @@ impl Drop for ImageLoader {
     fn drop(&mut self) {
         self.shared.0.lock_recover().stopping = true;
         self.shared.1.notify_all();
+        let deadline = Instant::now() + JOIN_TIMEOUT;
+        for handle in self.handles.drain(..) {
+            while !handle.is_finished() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            if handle.is_finished() {
+                let _ = handle.join();
+            }
+            // A worker still mid-decode at the deadline is detached here
+            // (dropping the handle) rather than blocking shutdown.
+        }
     }
 }
 /// Per-path decode counts, so tests can assert that work was not repeated.
@@ -367,7 +392,7 @@ fn load((path, cap): &Key) -> Result<CachedImage, String> {
     let (image, format) = decode_image_with_format(path).map_err(|e| e.to_string())?;
     let gif = format == Some(image::ImageFormat::Gif);
     let orig = (image.width(), image.height());
-    let rgba = Arc::new(downscale_to_cap(image.into_rgba8(), (*cap).min(2048))?);
+    let rgba = Arc::new(downscale_to_cap(image.into_rgba8(), (*cap).min(MAX_CAP))?);
     Ok(CachedImage { rgba, orig, gif })
 }
 fn modified_time(path: &Path) -> Option<std::time::SystemTime> {
@@ -428,6 +453,20 @@ fn crop_detail(image: &image::RgbaImage, key: &DetailKey) -> Result<image::RgbaI
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn drop_joins_workers_so_shared_state_is_released() {
+        let loader = ImageLoader::new();
+        // Each spawned worker holds a clone of the shared state; the loader
+        // holds one more. If Drop did not join, workers would keep these clones.
+        let shared = loader.shared.clone();
+        assert!(Arc::strong_count(&shared) >= 4);
+        drop(loader);
+        assert_eq!(
+            Arc::strong_count(&shared),
+            1,
+            "workers outlived the loader drop"
+        );
+    }
     #[test]
     fn cache_evicts_by_bytes_and_shared_reads_do_not_copy_pixels() {
         let mut state = State::default();
