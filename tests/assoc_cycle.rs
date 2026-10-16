@@ -20,6 +20,13 @@
 //! RESIDUAL RISK: `SHChangeNotify` is fire-and-forget (no return, infallible);
 //! real Explorer refresh still needs a real Windows shell.
 
+// The registry cycle is inherently Windows-only: `winreg` is a
+// `[target.'cfg(windows)'.dependencies]` dependency (see PR #47 and issue
+// #35), and the non-Windows `assoc` mirror has no registry to exercise. Gate
+// the whole file so `cargo test --all-targets` stays green on macOS/Linux;
+// the non-Windows API shape is guarded by `assoc-mirror-parity.rs` instead.
+#![cfg(windows)]
+
 use image_viewer::assoc::{is_default, register, sanitize_ext, unregister};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
