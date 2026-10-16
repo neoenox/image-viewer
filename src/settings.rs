@@ -274,7 +274,7 @@ impl ViewerSettings {
             // concurrent readers/writers (copy vs rename racing).
             for attempt in 0..20u32 {
                 match std::fs::rename(&temp, path) {
-                    Ok(()) => return Ok(()),
+                    Ok(()) => break,
                     Err(error) if is_retryable_share(&error) && attempt + 1 < 20 => {
                         std::thread::sleep(std::time::Duration::from_millis(
                             1 + u64::from(attempt),
@@ -578,6 +578,31 @@ mod tests {
             .collect();
         // Exactly the consumed temp file is gone; the untouched spares remain.
         assert_eq!(leftovers.len(), 63, "leftovers: {leftovers:?}");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn failed_save_leaves_no_temp_litter() {
+        let dir = std::env::temp_dir().join(format!(
+            "viewer-settings-fail-{}-{}",
+            std::process::id(),
+            SAVE_SEQUENCE.load(Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Use a *directory* as the target: the rename can never succeed, so
+        // the save takes its retry-exhaustion path and returns an error.
+        let target = dir.join("settings.txt");
+        std::fs::create_dir(&target).unwrap();
+        assert!(ViewerSettings::default().save(&target).is_err());
+        // The staging temp file must not survive a failed save.
+        let temps: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp."))
+            .collect();
+        assert!(temps.is_empty(), "temp litter: {temps:?}");
+        // The pre-existing target (a directory) is untouched.
+        assert!(target.is_dir());
         std::fs::remove_dir_all(dir).ok();
     }
 }
