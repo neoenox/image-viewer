@@ -351,21 +351,26 @@ impl ImageLoader {
         state.keep = keep_set;
     }
 }
+/// Wait up to `timeout` for each worker to finish, joining the ones that do and
+/// detaching any still running at the deadline so shutdown is never blocked.
+fn join_within_deadline(handles: Vec<std::thread::JoinHandle<()>>, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    for handle in handles {
+        while !handle.is_finished() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        if handle.is_finished() {
+            let _ = handle.join();
+        }
+        // A worker still mid-decode at the deadline is detached (its handle is
+        // dropped) rather than blocking shutdown.
+    }
+}
 impl Drop for ImageLoader {
     fn drop(&mut self) {
         self.shared.0.lock_recover().stopping = true;
         self.shared.1.notify_all();
-        let deadline = Instant::now() + JOIN_TIMEOUT;
-        for handle in self.handles.drain(..) {
-            while !handle.is_finished() && Instant::now() < deadline {
-                std::thread::sleep(Duration::from_millis(2));
-            }
-            if handle.is_finished() {
-                let _ = handle.join();
-            }
-            // A worker still mid-decode at the deadline is detached here
-            // (dropping the handle) rather than blocking shutdown.
-        }
+        join_within_deadline(std::mem::take(&mut self.handles), JOIN_TIMEOUT);
     }
 }
 /// Per-path decode counts, so tests can assert that work was not repeated.
@@ -466,6 +471,30 @@ mod tests {
             1,
             "workers outlived the loader drop"
         );
+    }
+    #[test]
+    fn join_within_deadline_detaches_a_worker_stuck_past_the_deadline() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let release = Arc::new(AtomicBool::new(false));
+        let worker_release = release.clone();
+        let stuck = std::thread::spawn(move || {
+            while !worker_release.load(Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        });
+        let quick = std::thread::spawn(|| {});
+        let start = Instant::now();
+        join_within_deadline(vec![quick, stuck], Duration::from_millis(50));
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed >= Duration::from_millis(50),
+            "returned before the deadline: {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "waited for a stuck worker instead of detaching it: {elapsed:?}"
+        );
+        release.store(true, Ordering::Relaxed);
     }
     #[test]
     fn cache_evicts_by_bytes_and_shared_reads_do_not_copy_pixels() {
