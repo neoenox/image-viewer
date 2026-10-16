@@ -1,0 +1,102 @@
+name: Verify Release
+
+# Consumer-side verification of a published release. The Release workflow only
+# *generates* SHA256SUMS.txt; nothing checked that the uploaded asset actually
+# matches it or that it is the expected version/architecture. This workflow
+# downloads the published asset and fails loudly if any of that is wrong.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to verify (e.g. v0.1.7)"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify-asset:
+    runs-on: windows-latest
+    steps:
+      - name: Resolve tag
+        id: tag
+        shell: pwsh
+        run: |
+          $tag = if ('${{ github.event_name }}' -eq 'release') {
+            '${{ github.event.release.tag_name }}'
+          } else {
+            '${{ github.event.inputs.tag }}'
+          }
+          if ([string]::IsNullOrWhiteSpace($tag)) {
+            Write-Error 'no tag resolved'
+            exit 1
+          }
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "tag=$tag"
+          Write-Output "verifying $tag"
+
+      - name: Download release assets
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          New-Item -ItemType Directory -Path dist -Force | Out-Null
+          gh release download '${{ steps.tag.outputs.tag }}' --repo '${{ github.repository }}' --dir dist --clobber
+
+      - name: Verify SHA256SUMS matches downloaded asset
+        shell: pwsh
+        run: |
+          $lines = Get-Content dist/SHA256SUMS.txt
+          if (-not $lines) { Write-Error 'empty SHA256SUMS.txt'; exit 1 }
+          $ok = $true
+          foreach ($line in $lines) {
+            if ([string]::IsNullOrWhiteSpace($line)) { continue }
+            $parts = $line -split '\s+', 2
+            $expected = $parts[0].Trim().ToLower()
+            $name = $parts[1].Trim()
+            $path = Join-Path dist $name
+            if (-not (Test-Path -LiteralPath $path)) {
+              Write-Error "missing asset listed in checksums: $name"
+              $ok = $false
+              continue
+            }
+            $actual = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLower()
+            if ($expected -ne $actual) {
+              Write-Error "hash mismatch for $name (expected $expected, got $actual)"
+              $ok = $false
+            } else {
+              Write-Output "hash OK: $name"
+            }
+          }
+          if (-not $ok) { exit 1 }
+
+      - name: Verify exe version matches tag
+        shell: pwsh
+        run: |
+          $tag = '${{ steps.tag.outputs.tag }}' -replace '^v', ''
+          $exe = Get-ChildItem -Path dist -Filter *.exe | Select-Object -First 1
+          if (-not $exe) { Write-Error 'no exe asset found'; exit 1 }
+          $ver = $exe.VersionInfo.ProductVersion
+          if ($ver -ne $tag) {
+            Write-Error "exe ProductVersion '$ver' does not match tag v$tag"
+            exit 1
+          }
+          Write-Output "version OK: $ver"
+
+      - name: Verify exe is a PE x86_64 binary
+        shell: pwsh
+        run: |
+          $exe = (Get-ChildItem -Path dist -Filter *.exe | Select-Object -First 1).FullName
+          $bytes = [System.IO.File]::ReadAllBytes($exe)
+          if ([char]$bytes[0] -ne 'M' -or [char]$bytes[1] -ne 'Z') {
+            Write-Error 'asset is not a PE (MZ) file'
+            exit 1
+          }
+          $off = [BitConverter]::ToInt32($bytes, 0x3C)
+          $machine = [BitConverter]::ToUInt16($bytes, $off + 4)
+          if ($machine -ne 0x8664) {
+            Write-Error ('unexpected machine type 0x{0:X4}, expected 0x8664 (x86_64)' -f $machine)
+            exit 1
+          }
+          Write-Output 'PE machine 0x8664 (x86_64)'
