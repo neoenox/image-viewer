@@ -57,7 +57,8 @@ in the exe's file properties.
   WebP, TIFF) is applied when decoding, so thumbnails, zoom and R / Shift+R start from
   the upright image.
 - Settings are saved to `%APPDATA%\image-viewer\settings.txt` when changed and loaded at
-  startup. Delete the file to return to the defaults.
+  startup. Delete the file to return to the defaults. The window size, position and
+  maximized state are saved there too, so the viewer reopens where you left it.
 
 The image being opened, neighbour preloads, and original-size region decoding each
 run on their own background worker, so opening an image never waits behind a preload
@@ -78,9 +79,11 @@ Decoding rejects images whose estimated expansion exceeds the 256 MiB per-job
 limit. This is not a process-wide memory ceiling: decoder working memory, display
 textures, GIF decoding, and thumbnail decoding also use memory. Region decoding
 expands the whole source image because the generic decoder does not support reading
-only a rectangle; the expanded image (at most 128 MiB) is kept while you pan across
-the same image and rotation, and dropped when you move to another file, rotate, or
-the file changes on disk. An in-flight decode finishes before cancellation
+only a rectangle; the expanded source is subject to the same 256 MiB per-job decode
+limit as any other load, and the cropped region is bounded by the 80 MiB preview
+cache budget. The expanded source is kept while you pan across the same image and
+rotation, and dropped when you move to another file, rotate, or the file changes on
+disk. An in-flight decode finishes before cancellation
 is observed; pending current-image work takes precedence over preloads.
 
 ## Latency benchmark
@@ -100,8 +103,11 @@ cargo test --release loader::bench -- --ignored --nocapture --test-threads=1
 - `imaging.rs`: bounded decoding, resizing, rotation.
 - `loader.rs`: priority scheduling, cache, original-resolution regions.
 - `animation.rs`: bounded GIF streaming and cancellation.
+- `upscale.rs`: high-quality (Lanczos) magnification of the visible region.
 - `app.rs`: viewer state and completed-result application.
 - `input.rs`, `settings.rs`, `view.rs`: controls, settings, and rendering.
+- `sync.rs`: lock helpers that survive a poisoned mutex; panic-safe worker decoding.
+- `win_icon.rs`: window/taskbar icon applied via Win32 (keeps eframe's icon code out of the exe).
 - `assoc.rs`: Windows file association registration and restoration.
 
 The implementation plan and acceptance criteria are in

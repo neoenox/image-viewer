@@ -4,6 +4,22 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static SAVE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
+/// Default window size in UI points: first launch, and when the saved value
+/// is missing or invalid.
+pub const DEFAULT_WINDOW_WIDTH: u32 = 1100;
+pub const DEFAULT_WINDOW_HEIGHT: u32 = 750;
+/// Saved window sizes outside this range are rejected (a hand-edited or stale
+/// file must never produce an unusable window); the defaults are used instead.
+/// The lower bounds match the enforced window minimum (640x480): width and
+/// height have separate floors so a minimum-size window still restores.
+pub const MIN_WINDOW_SIZE: u32 = 640;
+pub const MIN_WINDOW_HEIGHT: u32 = 480;
+pub const MAX_WINDOW_SIZE: u32 = 7680;
+/// Saved window positions outside this range are rejected (a hand-edited file
+/// must never open the window far off-screen); the window is centered instead.
+pub const MIN_WINDOW_POS: i32 = -10_000;
+pub const MAX_WINDOW_POS: i32 = 10_000;
+
 /// Windows sharing-violation (32) / access-denied (5) from concurrent
 /// `copy` vs `rename` on the same live file. Retryable with a short sleep;
 /// a persistent failure still returns an error (rename) or proceeds
@@ -49,6 +65,12 @@ const KNOWN_KEYS: &[&str] = &[
     "hover_pan",
     "auto_hide_toolbar",
     "zoom_quality",
+    "window_width",
+    "window_height",
+    "window_x",
+    "window_y",
+    "window_maximized",
+    "restore_window",
 ];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -58,6 +80,19 @@ pub struct ViewerSettings {
     pub hover_pan: bool,
     pub auto_hide_toolbar: bool,
     pub zoom_quality: ZoomQuality,
+    /// Last normal (non-maximized, non-fullscreen) window size in UI points,
+    /// restored at the next startup.
+    pub window_width: u32,
+    pub window_height: u32,
+    /// Last outer (frame/chrome top-left) window position in UI points.
+    /// `None` centers the window (first launch, or nothing saved yet).
+    pub window_x: Option<i32>,
+    pub window_y: Option<i32>,
+    /// Whether the window was maximized when it was last closed.
+    pub window_maximized: bool,
+    /// Reopen with the last window size, position and maximized state.
+    /// Off always opens centered at the default size, not maximized.
+    pub restore_window: bool,
     /// `key=value` lines from a newer release, kept verbatim and re-emitted
     /// on save. `version` is excluded (always emitted as the header).
     pub unknown: Vec<(String, String)>,
@@ -70,6 +105,12 @@ impl Default for ViewerSettings {
             hover_pan: true,
             auto_hide_toolbar: true,
             zoom_quality: ZoomQuality::High,
+            window_width: DEFAULT_WINDOW_WIDTH,
+            window_height: DEFAULT_WINDOW_HEIGHT,
+            window_x: None,
+            window_y: None,
+            window_maximized: false,
+            restore_window: true,
             unknown: Vec::new(),
         }
     }
@@ -106,6 +147,35 @@ impl ViewerSettings {
                 }
                 continue;
             }
+            if key == "window_width" || key == "window_height" {
+                if let Ok(size) = value.parse::<u32>() {
+                    let range = if key == "window_width" {
+                        MIN_WINDOW_SIZE..=MAX_WINDOW_SIZE
+                    } else {
+                        MIN_WINDOW_HEIGHT..=MAX_WINDOW_SIZE
+                    };
+                    if range.contains(&size) {
+                        if key == "window_width" {
+                            settings.window_width = size;
+                        } else {
+                            settings.window_height = size;
+                        }
+                    }
+                }
+                continue;
+            }
+            if key == "window_x" || key == "window_y" {
+                if let Ok(pos) = value.parse::<i32>() {
+                    if (MIN_WINDOW_POS..=MAX_WINDOW_POS).contains(&pos) {
+                        if key == "window_x" {
+                            settings.window_x = Some(pos);
+                        } else {
+                            settings.window_y = Some(pos);
+                        }
+                    }
+                }
+                continue;
+            }
             let value = match value {
                 "true" => true,
                 "false" => false,
@@ -116,6 +186,8 @@ impl ViewerSettings {
                 "hold_to_peek" => settings.hold_to_peek = value,
                 "hover_pan" => settings.hover_pan = value,
                 "auto_hide_toolbar" => settings.auto_hide_toolbar = value,
+                "window_maximized" => settings.window_maximized = value,
+                "restore_window" => settings.restore_window = value,
                 _ => {}
             }
         }
@@ -126,13 +198,23 @@ impl ViewerSettings {
             std::fs::create_dir_all(dir)?;
         }
         let mut text = format!(
-            "version=1\nwheel_navigation={}\nhold_to_peek={}\nhover_pan={}\nauto_hide_toolbar={}\nzoom_quality={}\n",
+            "version=1\nwheel_navigation={}\nhold_to_peek={}\nhover_pan={}\nauto_hide_toolbar={}\nzoom_quality={}\nwindow_width={}\nwindow_height={}\n",
             self.wheel_navigation,
             self.hold_to_peek,
             self.hover_pan,
             self.auto_hide_toolbar,
-            self.zoom_quality.as_str()
+            self.zoom_quality.as_str(),
+            self.window_width,
+            self.window_height
         );
+        if let Some(x) = self.window_x {
+            text.push_str(&format!("window_x={x}\n"));
+        }
+        if let Some(y) = self.window_y {
+            text.push_str(&format!("window_y={y}\n"));
+        }
+        text.push_str(&format!("window_maximized={}\n", self.window_maximized));
+        text.push_str(&format!("restore_window={}\n", self.restore_window));
         // Future fields carried verbatim (see `unknown`): re-emit last so a
         // reload parses them back identically.
         for (key, value) in &self.unknown {
@@ -226,21 +308,35 @@ mod tests {
             hover_pan: false,
             auto_hide_toolbar: false,
             zoom_quality: ZoomQuality::Standard,
+            window_width: 1280,
+            window_height: 800,
+            window_x: Some(100),
+            window_y: Some(-20),
+            window_maximized: true,
+            restore_window: false,
             unknown: Vec::new(),
         };
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        // The save is atomic and versioned: the header is emitted, and a
+        // recovery copy holds the exact pre-save settings (stale-temp healing
+        // is covered by `save_heals_stale_temp_file`).
         changed.save(&path).unwrap();
         assert_eq!(ViewerSettings::load(&path), changed);
         assert!(std::fs::read_to_string(&path)
             .unwrap()
             .starts_with("version=1\n"));
-        // A second save creates a recovery copy before the replacement.
-        // Recovery is manual (copy the .bak back); the guarantee locked here
-        // is that the .bak holds the exact pre-save settings.
         ViewerSettings::default().save(&path).unwrap();
         assert!(path.with_extension("bak").is_file());
         assert_eq!(ViewerSettings::load(&path.with_extension("bak")), changed);
         assert_eq!(ViewerSettings::load(&path), ViewerSettings::default());
         changed.save(&path).unwrap();
+        // No temp file of this process is left behind by a successful save.
+        let stray: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp."))
+            .collect();
+        assert!(stray.is_empty(), "stray temp after save: {stray:?}");
         // Unknown keys and bad values are ignored; known good lines still apply.
         std::fs::write(
             &path,
@@ -258,7 +354,69 @@ mod tests {
         );
         std::fs::write(&path, "zoom_quality=sharp\n").unwrap();
         assert_eq!(ViewerSettings::load(&path).zoom_quality, ZoomQuality::Sharp);
+        // Window size round-trips; out-of-range or unparsable values fall
+        // back to the defaults without touching the other size.
+        std::fs::write(&path, "window_width=1280\nwindow_height=800\n").unwrap();
+        let loaded = ViewerSettings::load(&path);
+        assert_eq!((loaded.window_width, loaded.window_height), (1280, 800));
+        // Heights down to the enforced window minimum (480) are kept.
+        std::fs::write(&path, "window_width=640\nwindow_height=500\n").unwrap();
+        let loaded = ViewerSettings::load(&path);
+        assert_eq!((loaded.window_width, loaded.window_height), (640, 500));
+        std::fs::write(
+            &path,
+            "window_width=abc\nwindow_height=0\nwindow_width=99999\nwindow_height=800\n",
+        )
+        .unwrap();
+        let loaded = ViewerSettings::load(&path);
+        assert_eq!(
+            (loaded.window_width, loaded.window_height),
+            (DEFAULT_WINDOW_WIDTH, 800)
+        );
+        // Position and the maximized flag round-trip; bad values are ignored.
+        std::fs::write(&path, "window_x=100\nwindow_y=-20\nwindow_maximized=true\n").unwrap();
+        let loaded = ViewerSettings::load(&path);
+        assert_eq!((loaded.window_x, loaded.window_y), (Some(100), Some(-20)));
+        assert!(loaded.window_maximized);
+        std::fs::write(
+            &path,
+            "window_x=abc\nwindow_y=99999\nwindow_maximized=yes\nwindow_x=-50\n",
+        )
+        .unwrap();
+        let loaded = ViewerSettings::load(&path);
+        assert_eq!((loaded.window_x, loaded.window_y), (Some(-50), None));
+        assert!(!loaded.window_maximized);
+        // The restore toggle round-trips; bad values keep the default (true).
+        std::fs::write(&path, "restore_window=false\n").unwrap();
+        assert!(!ViewerSettings::load(&path).restore_window);
+        std::fs::write(&path, "restore_window=maybe\n").unwrap();
+        assert!(ViewerSettings::load(&path).restore_window);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn repeated_saves_are_byte_identical() {
+        // Saving twice with no changes must not accumulate content (no
+        // duplicated lines, no growing temp litter): the file is idempotent.
+        let dir = std::env::temp_dir().join(format!("viewer-settings-idem-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.txt");
+        let settings = ViewerSettings {
+            window_x: Some(-30),
+            ..ViewerSettings::default()
+        };
+        settings.save(&path).unwrap();
+        let first = std::fs::read(&path).unwrap();
+        settings.save(&path).unwrap();
+        let second = std::fs::read(&path).unwrap();
+        settings.save(&path).unwrap();
+        let third = std::fs::read(&path).unwrap();
+        assert_eq!(first, second);
+        assert_eq!(second, third);
+        // And a load-save cycle is a fixed point too.
+        ViewerSettings::load(&path).save(&path).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), third);
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
@@ -270,13 +428,11 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("settings.txt");
-        // Fields from a newer release (e.g. #63's window_*): understood by
-        // neither load nor save as settings, yet never dropped either.
-        std::fs::write(
-            &path,
-            "version=1\nwindow_width=1280\nwindow_height=800\nrestore_window=true\n",
-        )
-        .unwrap();
+        // Fields from a newer release unknown to this schema: neither `load`
+        // nor `save` understands them, yet they are never dropped. (Window
+        // keys such as `window_width` are known after the #63 integration, so
+        // they are covered by `window_era_keys_survive_any_schema` instead.)
+        std::fs::write(&path, "version=1\ntheme=dark\nfuture_option=42\n").unwrap();
         let loaded = ViewerSettings::load(&path);
         // Known fields stay at their defaults; only `unknown` differs.
         assert_eq!(
@@ -289,16 +445,14 @@ mod tests {
         assert_eq!(
             loaded.unknown,
             [
-                ("window_width".to_owned(), "1280".to_owned()),
-                ("window_height".to_owned(), "800".to_owned()),
-                ("restore_window".to_owned(), "true".to_owned()),
+                ("theme".to_owned(), "dark".to_owned()),
+                ("future_option".to_owned(), "42".to_owned()),
             ]
         );
         loaded.save(&path).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
-        assert!(text.contains("window_width=1280\n"), "{text}");
-        assert!(text.contains("window_height=800\n"), "{text}");
-        assert!(text.contains("restore_window=true\n"), "{text}");
+        assert!(text.contains("theme=dark\n"), "{text}");
+        assert!(text.contains("future_option=42\n"), "{text}");
         // The schema marker is emitted exactly once, never duplicated.
         assert_eq!(text.matches("version=1\n").count(), 1, "{text}");
         // And a reload parses back identically (no duplication drift).

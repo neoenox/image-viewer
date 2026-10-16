@@ -110,7 +110,11 @@ impl ViewerApp {
             return;
         }
         let in_list = self.show_thumbnails
-            && ctx.input(|i| i.pointer.hover_pos().is_some_and(|p| p.x < 156.0));
+            && ctx.input(|i| {
+                i.pointer
+                    .hover_pos()
+                    .is_some_and(|p| p.x < crate::view::THUMBNAIL_PANEL_WIDTH)
+            });
         if in_list {
             return;
         }
