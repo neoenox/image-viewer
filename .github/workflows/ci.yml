@@ -37,3 +37,46 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Lint
         run: cargo clippy --locked --all-targets -- -D warnings
+
+  perf:
+    runs-on: windows-latest
+    steps:
+      # Two checkouts so the size gate is a same-runner, same-toolchain
+      # differential (head vs the PR base): immune to rustc/linker drift that
+      # would false-fail an absolute byte baseline.
+      - uses: actions/checkout@v5
+        with:
+          path: head
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.base.sha || 'main' }}
+          path: base
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            head -> target
+            base -> target-base
+      - name: Regression benches (release, gated)
+        working-directory: head
+        run: |
+          cargo test --locked --release --lib -- --ignored --nocapture bench::
+      - name: Build head release (size gate)
+        working-directory: head
+        run: cargo build --locked --release
+      - name: Build base release (size gate)
+        working-directory: base
+        run: cargo build --locked --release --target-dir target-base
+      - name: Binary size regression gate (+5%)
+        shell: pwsh
+        run: |
+          $base = (Get-Item 'base/target-base/release/image-viewer.exe').Length
+          $head = (Get-Item 'head/target/release/image-viewer.exe').Length
+          $limit = [math]::Floor($base * 1.05)
+          $pct = ($head - $base) / $base * 100
+          Write-Host ("release exe  base={0} B  head={1} B  delta={2:N2}%  limit={3} B (+5%)" -f $base, $head, $pct, $limit)
+          if ($head -gt $limit) {
+            Write-Error ("release exe grew {0:N2}% ({1} -> {2} B), over the +5% gate" -f $pct, $base, $head)
+            exit 1
+          }
+          Write-Host 'binary size gate: OK'
