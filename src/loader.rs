@@ -309,6 +309,18 @@ impl ImageLoader {
             .cache
             .contains_key(&(path.to_owned(), cap))
     }
+    /// Bytes currently retained for cached thumbnails plus the single detail
+    /// source. Lets tests assert the detail path keeps at most one source
+    /// rather than accumulating one per request.
+    #[cfg(test)]
+    pub(crate) fn retained_bytes(&self) -> usize {
+        let state = self.shared.0.lock_recover();
+        state.bytes
+            + state
+                .detail_src
+                .as_ref()
+                .map_or(0, |source| source.image.as_raw().len())
+    }
     pub fn request(&self, path: PathBuf, cap: usize) {
         let key = (path, cap);
         let mut state = self.shared.0.lock_recover();
@@ -495,6 +507,47 @@ mod tests {
             "waited for a stuck worker instead of detaching it: {elapsed:?}"
         );
         release.store(true, Ordering::Relaxed);
+    }
+    #[test]
+    fn detail_source_retention_is_single_and_bounded() {
+        let dir = std::env::temp_dir().join(format!("iv-detail-retain-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut paths = Vec::new();
+        for index in 0..2 {
+            let path = dir.join(format!("img{index}.png"));
+            image::RgbaImage::new(1024, 1024).save(&path).unwrap();
+            paths.push(path);
+        }
+        let loader = ImageLoader::new();
+        let expected = 1024 * 1024 * 4;
+        for path in &paths {
+            loader.detail(
+                path.clone(),
+                DetailKey {
+                    generation: 0,
+                    rotation: 0,
+                    region: [0, 0, 1024, 1024],
+                },
+            );
+            let deadline = Instant::now() + Duration::from_secs(30);
+            loop {
+                if let Some(result) = loader.poll_detail() {
+                    result.expect("detail decode");
+                    break;
+                }
+                assert!(Instant::now() < deadline, "detail request timed out");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            // Requesting detail for a second image must replace the retained
+            // source, not add to it: the bound is one source, not one per file.
+            assert_eq!(
+                loader.retained_bytes(),
+                expected,
+                "retained detail source bytes after {path:?}"
+            );
+            assert!(loader.retained_bytes() <= DETAIL_SOURCE_RGBA_BUDGET as usize);
+        }
+        std::fs::remove_dir_all(&dir).ok();
     }
     #[test]
     fn cache_evicts_by_bytes_and_shared_reads_do_not_copy_pixels() {
