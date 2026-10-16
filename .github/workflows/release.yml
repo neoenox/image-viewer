@@ -25,6 +25,10 @@ jobs:
       - name: Build release exe
         run: cargo build --release --locked
 
+      - name: Guard binary size
+        shell: pwsh
+        run: pwsh -NoProfile -File scripts/size-guard.ps1 -Exe target/release/image-viewer.exe
+
       - name: Stage asset
         shell: pwsh
         run: |
