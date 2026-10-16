@@ -204,15 +204,30 @@ mod performance_regression_tests {
 mod bench {
     use super::*;
 
+    /// Benchmarks target release (the `perf` CI job). Debug builds are roughly
+    /// 20x slower, so the same gate would otherwise false-fail an accidental
+    /// `cargo test` in debug; scaling the ceiling keeps both modes honest.
+    fn budget(release_ms: f64) -> f64 {
+        if cfg!(debug_assertions) {
+            release_ms * 20.0
+        } else {
+            release_ms
+        }
+    }
+
     fn median(mut times: Vec<f64>) -> f64 {
         times.sort_by(|a, b| a.partial_cmp(b).unwrap());
         times[times.len() / 2]
     }
 
     #[test]
-    #[ignore]
+    #[ignore = "perf gate: run in the release `perf` CI job (cargo test --release -- --ignored bench::)"]
     fn sort_hundreds_of_thousands_reports_median() {
-        for n in [50_000usize, 200_000] {
+        // Ceilings are ~20x the measured release median (50k ~110 ms,
+        // 200k ~520 ms), so they trip on algorithmic/allocator regressions,
+        // never on runner jitter. Pure CPU, deterministic input, no I/O.
+        let mut medians = Vec::new();
+        for (n, ceiling_ms) in [(50_000usize, 2_500.0), (200_000, 10_000.0)] {
             debug_assert!(!n.is_multiple_of(7919), "stride shares a factor with n");
             let mut times = Vec::new();
             for _ in 0..3 {
@@ -225,7 +240,22 @@ mod bench {
                 sort_image_files(&mut files);
                 times.push(start.elapsed().as_secs_f64() * 1000.0);
             }
-            println!("BENCH sort {n} files: median {:.1} ms", median(times));
+            let m = median(times);
+            println!("BENCH sort {n} files: median {m:.1} ms");
+            assert!(
+                m < budget(ceiling_ms),
+                "sort {n} median {m:.1} ms exceeded budget {:.0} ms",
+                budget(ceiling_ms)
+            );
+            medians.push(m);
         }
+        // Scaling guard: O(n log n) means 4x input is ~4.7x time. A ratio near
+        // 16x would indicate an accidental O(n^2); cap well below that.
+        let ratio = medians[1] / medians[0].max(1.0);
+        println!("BENCH sort scaling 200k/50k: {ratio:.2}x");
+        assert!(
+            ratio < 12.0,
+            "sort scaling regressed to {ratio:.2}x (O(n^2)?)"
+        );
     }
 }

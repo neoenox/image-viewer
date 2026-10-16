@@ -421,8 +421,18 @@ mod tests {
 mod bench {
     use super::*;
 
+    /// Benches target release (the `perf` CI job); debug is ~20x slower, so the
+    /// ceiling is scaled there to avoid false failures on an accidental debug run.
+    fn budget(release_ms: f64) -> f64 {
+        if cfg!(debug_assertions) {
+            release_ms * 20.0
+        } else {
+            release_ms
+        }
+    }
+
     #[test]
-    #[ignore]
+    #[ignore = "perf gate: run in the release `perf` CI job (cargo test --release -- --ignored bench::)"]
     fn resample_latency() {
         let mut s = 1u64;
         let src = image::RgbaImage::from_fn(2000, 2000, |_, _| {
@@ -455,7 +465,16 @@ mod bench {
                     .collect();
                 times.sort_by(|a, b| a.partial_cmp(b).unwrap());
                 let mode = format!("sharp{sharpen}");
-                println!("BENCH upscale {mode} {label}: median {:.1} ms", times[2]);
+                let m = times[2];
+                println!("BENCH upscale {mode} {label}: median {m:.1} ms");
+                // ~16x the slowest measured config (4K@2x sharp3 ~180 ms). Pure
+                // CPU/SIMD, no I/O; guards against losing a SIMD path or doing
+                // pathological resampling work per frame.
+                assert!(
+                    m < budget(3_000.0),
+                    "upscale {mode} {label} median {m:.1} ms exceeded budget {:.0} ms",
+                    budget(3_000.0)
+                );
             }
         }
     }
