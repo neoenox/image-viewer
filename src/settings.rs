@@ -1,4 +1,7 @@
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static SAVE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// Default window size in UI points: first launch, and when the saved value
 /// is missing or invalid.
@@ -6,7 +9,10 @@ pub const DEFAULT_WINDOW_WIDTH: u32 = 1100;
 pub const DEFAULT_WINDOW_HEIGHT: u32 = 750;
 /// Saved window sizes outside this range are rejected (a hand-edited or stale
 /// file must never produce an unusable window); the defaults are used instead.
-pub const MIN_WINDOW_SIZE: u32 = 200;
+/// The lower bounds match the enforced window minimum (640x480): width and
+/// height have separate floors so a minimum-size window still restores.
+pub const MIN_WINDOW_SIZE: u32 = 640;
+pub const MIN_WINDOW_HEIGHT: u32 = 480;
 pub const MAX_WINDOW_SIZE: u32 = 7680;
 /// Saved window positions outside this range are rejected (a hand-edited file
 /// must never open the window far off-screen); the window is centered instead.
@@ -58,6 +64,9 @@ pub struct ViewerSettings {
     pub window_y: Option<i32>,
     /// Whether the window was maximized when it was last closed.
     pub window_maximized: bool,
+    /// Reopen with the last window size, position and maximized state.
+    /// Off always opens centered at the default size, not maximized.
+    pub restore_window: bool,
 }
 impl Default for ViewerSettings {
     fn default() -> Self {
@@ -72,6 +81,7 @@ impl Default for ViewerSettings {
             window_x: None,
             window_y: None,
             window_maximized: false,
+            restore_window: true,
         }
     }
 }
@@ -102,7 +112,12 @@ impl ViewerSettings {
             }
             if key == "window_width" || key == "window_height" {
                 if let Ok(size) = value.parse::<u32>() {
-                    if (MIN_WINDOW_SIZE..=MAX_WINDOW_SIZE).contains(&size) {
+                    let range = if key == "window_width" {
+                        MIN_WINDOW_SIZE..=MAX_WINDOW_SIZE
+                    } else {
+                        MIN_WINDOW_HEIGHT..=MAX_WINDOW_SIZE
+                    };
+                    if range.contains(&size) {
                         if key == "window_width" {
                             settings.window_width = size;
                         } else {
@@ -135,6 +150,7 @@ impl ViewerSettings {
                 "hover_pan" => settings.hover_pan = value,
                 "auto_hide_toolbar" => settings.auto_hide_toolbar = value,
                 "window_maximized" => settings.window_maximized = value,
+                "restore_window" => settings.restore_window = value,
                 _ => {}
             }
         }
@@ -161,7 +177,18 @@ impl ViewerSettings {
             text.push_str(&format!("window_y={y}\n"));
         }
         text.push_str(&format!("window_maximized={}\n", self.window_maximized));
-        std::fs::write(path, text)
+        text.push_str(&format!("restore_window={}\n", self.restore_window));
+        // Write-then-rename so a crash never leaves a half-written file: the
+        // previous complete file stays in place until the rename. The pid
+        // suffix separates running processes; sequence separates concurrent
+        // saves within the same process (window tracking and user settings).
+        let sequence = SAVE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let tmp = path.with_extension(format!("tmp.{}.{}", std::process::id(), sequence));
+        if let Err(error) = std::fs::write(&tmp, text).and_then(|()| std::fs::rename(&tmp, path)) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(error);
+        }
+        Ok(())
     }
 }
 
@@ -186,9 +213,24 @@ mod tests {
             window_x: Some(100),
             window_y: Some(-20),
             window_maximized: true,
+            restore_window: false,
         };
+        // Regression: a stale same-PID file from another save must never be
+        // truncated. Each save now writes its own unique temporary pathname.
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let stale = path.with_extension(format!("tmp.{}", std::process::id()));
+        std::fs::write(&stale, "stale-settings").unwrap();
         changed.save(&path).unwrap();
         assert_eq!(ViewerSettings::load(&path), changed);
+        assert_eq!(std::fs::read_to_string(&stale).unwrap(), "stale-settings");
+        std::fs::remove_file(&stale).unwrap();
+        // The save is atomic: no temp file of this process is left behind.
+        assert!(
+            !path
+                .with_extension(format!("tmp.{}", std::process::id()))
+                .exists(),
+            "stray temp file after save"
+        );
         // Unknown keys and bad values are ignored; known good lines still apply.
         std::fs::write(
             &path,
@@ -211,6 +253,10 @@ mod tests {
         std::fs::write(&path, "window_width=1280\nwindow_height=800\n").unwrap();
         let loaded = ViewerSettings::load(&path);
         assert_eq!((loaded.window_width, loaded.window_height), (1280, 800));
+        // Heights down to the enforced window minimum (480) are kept.
+        std::fs::write(&path, "window_width=640\nwindow_height=500\n").unwrap();
+        let loaded = ViewerSettings::load(&path);
+        assert_eq!((loaded.window_width, loaded.window_height), (640, 500));
         std::fs::write(
             &path,
             "window_width=abc\nwindow_height=0\nwindow_width=99999\nwindow_height=800\n",
@@ -234,6 +280,36 @@ mod tests {
         let loaded = ViewerSettings::load(&path);
         assert_eq!((loaded.window_x, loaded.window_y), (Some(-50), None));
         assert!(!loaded.window_maximized);
+        // The restore toggle round-trips; bad values keep the default (true).
+        std::fs::write(&path, "restore_window=false\n").unwrap();
+        assert!(!ViewerSettings::load(&path).restore_window);
+        std::fs::write(&path, "restore_window=maybe\n").unwrap();
+        assert!(ViewerSettings::load(&path).restore_window);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn repeated_saves_are_byte_identical() {
+        // Saving twice with no changes must not accumulate content (no
+        // duplicated lines, no growing temp litter): the file is idempotent.
+        let dir = std::env::temp_dir().join(format!("viewer-settings-idem-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.txt");
+        let settings = ViewerSettings {
+            window_x: Some(-30),
+            ..ViewerSettings::default()
+        };
+        settings.save(&path).unwrap();
+        let first = std::fs::read(&path).unwrap();
+        settings.save(&path).unwrap();
+        let second = std::fs::read(&path).unwrap();
+        settings.save(&path).unwrap();
+        let third = std::fs::read(&path).unwrap();
+        assert_eq!(first, second);
+        assert_eq!(second, third);
+        // And a load-save cycle is a fixed point too.
+        ViewerSettings::load(&path).save(&path).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), third);
+        std::fs::remove_dir_all(dir).ok();
     }
 }
