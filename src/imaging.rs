@@ -144,6 +144,29 @@ mod tests {
     }
 
     #[test]
+    fn sixteen_bit_source_uses_the_same_rgba_budget_boundary() {
+        let dir = std::env::temp_dir().join(format!("iv-budget-16bit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("rgb16.png");
+        let img16 = image::DynamicImage::ImageRgb16(image::ImageBuffer::from_pixel(
+            64,
+            64,
+            image::Rgb([1000u16, 2000u16, 3000u16]),
+        ));
+        img16
+            .save_with_format(&path, image::ImageFormat::Png)
+            .unwrap();
+        let exact = 64 * 64 * 4;
+        // A 16-bit source is bounded by the same w*h*4 RGBA budget as an 8-bit
+        // one: the tightened decoder limit (#84) must accept a 16-bit image
+        // that fits the caller's budget rather than rejecting it for its wider
+        // samples.
+        assert!(decode_image_with_pixel_budget(&path, exact).is_ok());
+        assert!(decode_image_with_pixel_budget(&path, exact - 1).is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn exif_orientation_is_applied_on_decode() {
         let dir = std::env::temp_dir().join(format!("iv-exif-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
