@@ -4,7 +4,20 @@ name: Verify Release
 # *generates* SHA256SUMS.txt; nothing checked that the uploaded asset actually
 # matches it or that it is the expected version/architecture. This workflow
 # downloads the published asset and fails loudly if any of that is wrong.
+#
+# Triggers:
+# - workflow_run: the Release workflow creates the GitHub Release with the
+#   repository GITHUB_TOKEN, and per GitHub's rules an event caused by the
+#   GITHUB_TOKEN does not start new workflow runs. So `release: published` never
+#   fires for our own releases; we chain off the Release workflow completing.
+#   Dry runs (workflow_dispatch of Release) do not publish, so they are skipped.
+# - release: published: covers releases created by other means (manual/UI/user
+#   token), which do emit the event.
+# - workflow_dispatch: manual verification of a specific tag.
 on:
+  workflow_run:
+    workflows: ["Release"]
+    types: [completed]
   release:
     types: [published]
   workflow_dispatch:
@@ -24,19 +37,34 @@ jobs:
         id: tag
         shell: pwsh
         run: |
-          $tag = if ('${{ github.event_name }}' -eq 'release') {
-            '${{ github.event.release.tag_name }}'
+          $event = '${{ github.event_name }}'
+          $skip = $false
+          if ($event -eq 'release') {
+            $tag = '${{ github.event.release.tag_name }}'
+          } elseif ($event -eq 'workflow_run') {
+            $tag = '${{ github.event.workflow_run.head_branch }}'
+            # Only a real tag push publishes a release; a dry run (workflow_dispatch)
+            # finishes successfully with head_branch "main" and no release.
+            if ('${{ github.event.workflow_run.conclusion }}' -ne 'success' -or $tag -notmatch '^v') {
+              $skip = $true
+            }
           } else {
-            '${{ github.event.inputs.tag }}'
+            $tag = '${{ github.event.inputs.tag }}'
+          }
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "skip=$($skip.ToString().ToLower())"
+          if ($skip) {
+            Write-Output "skipping: Release run did not publish a v* tag (head_branch=$tag); nothing to verify"
+            exit 0
           }
           if ([string]::IsNullOrWhiteSpace($tag)) {
             Write-Error 'no tag resolved'
             exit 1
           }
           Add-Content -Path $env:GITHUB_OUTPUT -Value "tag=$tag"
-          Write-Output "verifying $tag"
+          Write-Output "resolved tag: $tag (event: $event)"
 
       - name: Download release assets
+        if: steps.tag.outputs.skip != 'true'
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -45,6 +73,7 @@ jobs:
           gh release download '${{ steps.tag.outputs.tag }}' --repo '${{ github.repository }}' --dir dist --clobber
 
       - name: Verify SHA256SUMS matches downloaded asset
+        if: steps.tag.outputs.skip != 'true'
         shell: pwsh
         run: |
           $lines = Get-Content dist/SHA256SUMS.txt
@@ -72,6 +101,7 @@ jobs:
           if (-not $ok) { exit 1 }
 
       - name: Verify exe version matches tag
+        if: steps.tag.outputs.skip != 'true'
         shell: pwsh
         run: |
           $tag = '${{ steps.tag.outputs.tag }}' -replace '^v', ''
@@ -85,6 +115,7 @@ jobs:
           Write-Output "version OK: $ver"
 
       - name: Verify exe is a PE x86_64 binary
+        if: steps.tag.outputs.skip != 'true'
         shell: pwsh
         run: |
           $exe = (Get-ChildItem -Path dist -Filter *.exe | Select-Object -First 1).FullName
