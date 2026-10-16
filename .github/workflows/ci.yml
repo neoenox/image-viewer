@@ -69,6 +69,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Run tests
         run: cargo test --locked --all-targets
+      - name: Guard against production registry writes
+        run: powershell -NoProfile -File tests/guard-registry-keys.ps1
       - name: Test association scripts without changing user defaults
         run: powershell -NoProfile -File tests/association-scripts.ps1
 
