@@ -27,7 +27,7 @@ extern "system" {
     );
 }
 
-/// 関連付け変更をExplorerへ通知する。APIに戻り値はなく失敗は無視する。
+/// 関連付け変更をExplorerへ通知する。APIに戻り値はなく失敗不能。
 /// 非Windowsでは何もしない。
 fn notify_shell_assoc_changed() {
     #[cfg(windows)]
@@ -165,8 +165,8 @@ pub fn open_default_apps() -> io::Result<std::process::Child> {
 }
 
 /// 関連付け定数を `KEY=VALUE` 行（UTF-8）で標準出力する。
-/// PSラッパーがここだけを正として読むため、ProgID・キー名・拡張子リスト
-/// 二重管理しない。ウィンドウは開かない。
+/// PSラッパーがここだけを正として読むため、ProgID・キー名・拡張子リストの
+/// 二重管理がない。ウィンドウは開かない。
 pub fn print_assoc_config() -> io::Result<()> {
     let exe = exe_path()?;
     let app_exe = exe
@@ -198,6 +198,7 @@ mod tests {
         assert_eq!(sanitize_ext(r"a\b"), None);
         assert_eq!(sanitize_ext("jp g"), None);
         assert_eq!(sanitize_ext("jp-g"), None);
+        assert_eq!(sanitize_ext("é"), None);
         assert!(!is_default("a/b", PROG_ID));
     }
 

@@ -9,6 +9,42 @@ use image_viewer::{
     collect_siblings, decode_image, is_supported, setup_jp_font, ViewerApp, PEEK_MAGNIFICATION,
 };
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+
+/// 単色画像を書き出す（JPEGはアルファ非対応のためRGBへ変換）。
+fn solid(path: &Path, w: u32, h: u32, px: image::Rgba<u8>) {
+    let buf = image::RgbaImage::from_pixel(w, h, px);
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if ext == "jpg" || ext == "jpeg" {
+        // JPEGはアルファ非対応のためRGBに変換
+        image::DynamicImage::ImageRgba8(buf)
+            .to_rgb8()
+            .save(path)
+            .unwrap();
+    } else {
+        buf.save(path).unwrap();
+    }
+}
+
+/// 3000x2000 の巨大JPEG。エンコードが重いのでプロセス内で一度だけ生成し、
+/// 各フィクスチャへはコピーする（#43: 巨大画像fixtureの共有化）。
+fn shared_big_jpeg() -> &'static Path {
+    static BIG: OnceLock<PathBuf> = OnceLock::new();
+    BIG.get_or_init(|| {
+        let dir =
+            std::env::temp_dir().join(format!("image-viewer-e2e-shared-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("z-big.jpg");
+        if !path.exists() {
+            solid(&path, 3000, 2000, image::Rgba([120, 120, 120, 255]));
+        }
+        path
+    })
+}
 
 /// テストごとに独立したフィクスチャフォルダを作る。tagで並列実行時の衝突を避ける。
 fn fixture_dir(tag: &str) -> PathBuf {
@@ -18,23 +54,6 @@ fn fixture_dir(tag: &str) -> PathBuf {
     }
     std::fs::create_dir_all(&dir).unwrap();
 
-    fn solid(path: &Path, w: u32, h: u32, px: image::Rgba<u8>) {
-        let buf = image::RgbaImage::from_pixel(w, h, px);
-        let ext = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("")
-            .to_ascii_lowercase();
-        if ext == "jpg" || ext == "jpeg" {
-            // JPEGはアルファ非対応のためRGBに変換
-            image::DynamicImage::ImageRgba8(buf)
-                .to_rgb8()
-                .save(path)
-                .unwrap();
-        } else {
-            buf.save(path).unwrap();
-        }
-    }
     use image::Rgba;
     // 名前順ソートで決定的な並びになるよう命名
     solid(&dir.join("a.png"), 100, 80, Rgba([200, 30, 30, 255]));
@@ -57,13 +76,8 @@ fn fixture_dir(tag: &str) -> PathBuf {
     std::fs::write(dir.join("d.png"), b"not an image at all").unwrap();
     // 未対応拡張子（一覧から除外される）
     std::fs::write(dir.join("e.txt"), b"hello").unwrap();
-    // テクスチャ上限(2048)超えの巨大画像。jpgで保存して高速化。
-    solid(
-        &dir.join("z-big.jpg"),
-        3000,
-        2000,
-        Rgba([120, 120, 120, 255]),
-    );
+    // テクスチャ上限(2048)超えの巨大画像。共有生成したJPEGをコピーして高速化。
+    std::fs::copy(shared_big_jpeg(), dir.join("z-big.jpg")).unwrap();
     dir
 }
 
@@ -161,7 +175,12 @@ fn oversized_image_fits_texture_limit() {
     assert!(app.has_texture());
     let [w, h] = app.texture_size().unwrap();
     assert!(w <= 2048 && h <= 2048, "texture was {w}x{h}");
-    assert_eq!((w, h), (2048, 1365));
+    // 厳密値ではなく元画像の縦横比で検証し、リサンプル実装の変更に耐える（#43）。
+    let ratio = w as f64 / h as f64;
+    assert!(
+        (ratio - 3000.0 / 2000.0).abs() < 0.01,
+        "aspect ratio for {w}x{h} drifted from 3:2"
+    );
     // 元画像サイズの記録はフル解像度のまま
     assert_eq!(app.image_dims(), Some((3000, 2000)));
     cleanup(&dir);
