@@ -2,18 +2,18 @@ use crate::{assoc, files::*, imaging::*, loader::ImageLoader};
 use eframe::egui;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
-/// ツールバーアイコン。Noto Sans JP と Segoe UI Symbol の両方にあるグリフのみ使う。
-/// （Segoe UI Symbolは setup_jp_font でフォールバック登録される）
-pub(crate) const ICON_OPEN: char = '\u{1F4C1}';
-pub(crate) const ICON_PREV: char = '\u{23EE}';
-pub(crate) const ICON_NEXT: char = '\u{23ED}';
-pub(crate) const ICON_FIT: char = '\u{26F6}';
-pub(crate) const ICON_ROT_L: char = '\u{27F2}';
-pub(crate) const ICON_ROT_R: char = '\u{27F3}';
-pub(crate) const ICON_PLAY: char = '\u{25B6}';
-pub(crate) const ICON_STOP: char = '\u{25A0}';
-pub(crate) const ICON_FULL: char = '\u{2922}';
-pub(crate) const ICON_ASSOC: char = '\u{1F517}';
+/// Compact ASCII controls, all representable in Shift-JIS.
+/// Japanese tooltips describe each action without relying on symbol fonts.
+pub(crate) const ICON_OPEN: char = 'O';
+pub(crate) const ICON_PREV: char = '<';
+pub(crate) const ICON_NEXT: char = '>';
+pub(crate) const ICON_FIT: char = '=';
+pub(crate) const ICON_ROT_L: char = 'L';
+pub(crate) const ICON_ROT_R: char = 'R';
+pub(crate) const ICON_PLAY: char = 'P';
+pub(crate) const ICON_STOP: char = 'S';
+pub(crate) const ICON_FULL: char = 'F';
+pub(crate) const ICON_ASSOC: char = 'A';
 
 /// 中ボタンを押している間の拡大率（押した時点の表示倍率に対する倍数）。
 pub const PEEK_MAGNIFICATION: f32 = 2.0;
@@ -148,6 +148,7 @@ pub struct ViewerApp {
     /// throttled so interactive resizing does not rewrite the file every
     /// frame; the final size is flushed on close (see `track_window_size`).
     pub(crate) last_window_save: Instant,
+    pub(crate) window_state_dirty: bool,
     /// Whether the startup monitor-fit check ran (see `window_state`).
     pub(crate) startup_fit_done: bool,
 }
@@ -215,6 +216,7 @@ impl ViewerApp {
             show_assoc: false,
             assoc_status: Vec::new(),
             last_window_save: Instant::now(),
+            window_state_dirty: false,
             startup_fit_done: false,
         };
         if let Some(p) = initial {
@@ -322,7 +324,6 @@ impl ViewerApp {
                     Ok(image) => {
                         self.base = Some(image.rgba);
                         self.orig_dims = Some(image.orig);
-                        self.status_msg.clear();
                         if image.gif {
                             self.animation = Some(crate::animation::Animation::new(
                                 self.current_path().unwrap().to_owned(),
@@ -960,10 +961,7 @@ impl ViewerApp {
                     "{}件のドロップを受け取りました。最初の1件のみ開きます。",
                     dropped_count
                 );
-                self.load_error = Some(match self.load_error.take() {
-                    Some(error) => format!("{error} {notice}"),
-                    None => notice,
-                });
+                self.status_msg = notice;
             }
         }
     }
@@ -1004,6 +1002,46 @@ pub fn run() -> eframe::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn toolbar_icons_stay_within_shift_jis() {
+        // ASCII is a strict subset of Shift-JIS; reject escaped Unicode too.
+        assert!(TOOLBAR_ICONS.iter().all(char::is_ascii));
+    }
+    #[test]
+    fn multiple_dropped_images_keep_the_first_visible() {
+        let dir = std::env::temp_dir().join(format!("iv-multidrop-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let paths: Vec<_> = (0..2).map(|i| dir.join(format!("{i}.png"))).collect();
+        for path in &paths {
+            image::RgbaImage::new(4, 4).save(path).unwrap();
+        }
+        let ctx = egui::Context::default();
+        let mut app = ViewerApp::new(None);
+        let raw = egui::RawInput {
+            dropped_files: paths
+                .iter()
+                .map(|path| egui::DroppedFile {
+                    path: Some(path.clone()),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let _ = ctx.run(raw, |ctx| app.apply_dropped(ctx));
+        let start = Instant::now();
+        while app.is_loading() {
+            app.poll_loading(&ctx);
+            assert!(start.elapsed() < Duration::from_secs(10));
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(app.current_path(), Some(paths[0].as_path()));
+        assert!(app.has_texture());
+        assert_eq!(app.load_error(), None);
+        assert!(app.status_msg.contains("2"));
+        drop(app);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn cli_only_accepts_existing_supported_paths() {
         let dir = std::env::temp_dir().join(format!("iv-cli-filter-{}", std::process::id()));

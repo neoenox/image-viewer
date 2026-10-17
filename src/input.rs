@@ -152,9 +152,12 @@ impl ViewerApp {
             return;
         }
         // smoothは複数フレームに分散して遅く感じるためrawを使う。
-        // 1ノッチ≒±40なので、しきい値20で確実に1枚進む。
+        // 1ノッチは約40。端数と1フレームの上限を超えた分は次へ持ち越す。
         let y = ctx.input(|i| i.raw_scroll_delta.y);
         let steps = wheel_navigation_steps(&mut self.wheel_accum, y);
+        // Navigation resets input for a new selection; this wheel gesture
+        // must retain its remainder, including any capped burst.
+        let remainder = self.wheel_accum;
         if steps < 0 {
             for _ in 0..steps.unsigned_abs() {
                 self.next(ctx);
@@ -163,6 +166,10 @@ impl ViewerApp {
             for _ in 0..steps as u32 {
                 self.prev(ctx);
             }
+        }
+        self.wheel_accum = remainder;
+        if remainder.abs() >= 40.0 {
+            ctx.request_repaint();
         }
     }
 
@@ -190,6 +197,34 @@ impl ViewerApp {
 #[cfg(test)]
 mod tests {
     use super::wheel_navigation_steps;
+
+    #[test]
+    fn navigation_preserves_fractional_and_burst_wheel_input() {
+        use crate::app::ViewerApp;
+        use eframe::egui;
+        let ctx = egui::Context::default();
+        let mut app = ViewerApp::new(None);
+        app.files = (0..10).map(|i| format!("missing-{i}.png").into()).collect();
+        for (delta, index, carry) in [
+            (-45.0, 1, -5.0),
+            (-35.0, 2, 0.0),
+            (-220.0, 6, -60.0),
+            (0.0, 7, -20.0),
+            (-20.0, 8, 0.0),
+        ] {
+            let raw = egui::RawInput {
+                events: vec![egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: egui::vec2(0.0, delta),
+                    modifiers: Default::default(),
+                }],
+                ..Default::default()
+            };
+            let _ = ctx.run(raw, |ctx| app.handle_wheel_nav(ctx));
+            assert_eq!(app.index, index);
+            assert_eq!(app.wheel_accum, carry);
+        }
+    }
 
     #[test]
     fn wheel_delta_keeps_remainder_and_drains_burst() {

@@ -521,11 +521,8 @@ impl ViewerApp {
             });
         self.show_settings = open;
         if self.settings != before {
-            if let Some(path) = &self.settings_path {
-                if let Err(error) = self.settings.save(path) {
-                    self.status_msg = format!("設定を保存できませんでした: {error}");
-                }
-            }
+            self.window_state_dirty = true;
+            self.flush_settings();
         }
         if !self.settings.hold_to_peek {
             self.end_peek();
