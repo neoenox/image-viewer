@@ -1,20 +1,26 @@
 use crate::app::*;
 use eframe::egui;
 use std::time::{Duration, Instant};
+
+/// One physical wheel notch arrives as ~40 units of raw scroll delta (egui
+/// scales a line delta by its 40-unit line-scroll speed), so this is both the
+/// size of one navigation step and the leftover at which a capped burst still
+/// needs a repaint to keep draining into the next frame.
+const WHEEL_STEP: f32 = 40.0;
+
 /// Carry the unused fraction into the next frame instead of dropping fast
 /// wheel events. Cap work per frame without losing the remaining movement.
 fn wheel_navigation_steps(accum: &mut f32, delta: f32) -> i32 {
-    const THRESHOLD: f32 = 40.0;
     const MAX_STEPS: i32 = 4;
     if !delta.is_finite() {
         *accum = 0.0;
         return 0;
     }
     *accum += delta;
-    let steps = (*accum / THRESHOLD)
+    let steps = (*accum / WHEEL_STEP)
         .trunc()
         .clamp(-(MAX_STEPS as f32), MAX_STEPS as f32) as i32;
-    *accum -= steps as f32 * THRESHOLD;
+    *accum -= steps as f32 * WHEEL_STEP;
     steps
 }
 
@@ -152,7 +158,7 @@ impl ViewerApp {
             return;
         }
         // smoothは複数フレームに分散して遅く感じるためrawを使う。
-        // 1ノッチは約40。端数と1フレームの上限を超えた分は次へ持ち越す。
+        // 1ノッチは約WHEEL_STEP。端数と1フレームの上限を超えた分は次へ持ち越す。
         let y = ctx.input(|i| i.raw_scroll_delta.y);
         let steps = wheel_navigation_steps(&mut self.wheel_accum, y);
         // Navigation resets input for a new selection; this wheel gesture
@@ -168,7 +174,7 @@ impl ViewerApp {
             }
         }
         self.wheel_accum = remainder;
-        if remainder.abs() >= 40.0 {
+        if remainder.abs() >= WHEEL_STEP {
             ctx.request_repaint();
         }
     }
@@ -239,12 +245,33 @@ mod tests {
         assert_eq!(carry, -20.0);
         assert_eq!(wheel_navigation_steps(&mut carry, -20.0), -1);
         assert_eq!(carry, 0.0);
+        // The per-frame cap is symmetric: a large upward burst drains at most
+        // MAX_STEPS and keeps the rest as a remainder for the next frame.
+        assert_eq!(wheel_navigation_steps(&mut carry, 250.0), 4);
+        assert_eq!(carry, 90.0);
+    }
+
+    #[test]
+    fn wheel_step_boundary_and_fractional_carry() {
+        let mut carry = 0.0;
+        // Just under one notch: nothing moves yet, the fraction is kept.
+        assert_eq!(wheel_navigation_steps(&mut carry, 38.0), 0);
+        assert_eq!(carry, 38.0);
+        // The next sliver reaches exactly one step's worth and fires it.
+        assert_eq!(wheel_navigation_steps(&mut carry, 2.0), 1);
+        assert_eq!(carry, 0.0);
+        // A whole notch is exactly one step.
+        assert_eq!(wheel_navigation_steps(&mut carry, 40.0), 1);
+        assert_eq!(carry, 0.0);
     }
 
     #[test]
     fn wheel_discard_non_finite_delta() {
         let mut carry = 5.0;
         assert_eq!(wheel_navigation_steps(&mut carry, f32::INFINITY), 0);
+        assert_eq!(carry, 0.0);
+        let mut carry = 5.0;
+        assert_eq!(wheel_navigation_steps(&mut carry, f32::NAN), 0);
         assert_eq!(carry, 0.0);
     }
 }
