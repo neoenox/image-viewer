@@ -54,7 +54,17 @@ public static class Win32Fg {
     [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr h, int c);
     [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr h, IntPtr dc, uint f);
     [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
+    [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint msg, IntPtr w, IntPtr l);
     [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L; public int T; public int R; public int B; }
+    // One WM_MOUSEWHEEL notch (WHEEL_DELTA = 120) posted straight to the HWND.
+    // Injected wheel input is routed by the OS to whatever window the cursor
+    // hit-tests against, which a background window can steal; posting the message
+    // to the target handle still exercises the real winit -> egui -> wheel path.
+    public static bool PostWheel(IntPtr h, int delta, int x, int y) {
+        IntPtr wp = (IntPtr)unchecked(delta << 16);
+        IntPtr lp = (IntPtr)unchecked((y << 16) | (x & 0xFFFF));
+        return PostMessage(h, 0x020A, wp, lp);
+    }
     public static bool Force(IntPtr h) {
         uint cur = GetCurrentThreadId();
         IntPtr fg = GetForegroundWindow();
@@ -108,6 +118,17 @@ function ShootHwnd($Hwnd, [string]$Name) {
         $bmp.Save((Join-Path $ShotDir $Name))
     } finally { $bmp.Dispose() }
     Write-Output "shot: $Name ($($w)x${h})"
+}
+
+# Send one mouse-wheel notch (WHEEL_DELTA = 120) to the window centre. With the
+# default settings (wheel_navigation = true, no Ctrl) this navigates images
+# (positive delta = prev, negative = next) rather than zooming.
+function SendWheel($Hwnd, [int]$Delta) {
+    $rect = New-Object Win32Fg+RECT
+    [Win32Fg]::GetWindowRect($Hwnd, [ref]$rect) | Out-Null
+    $cx = [int](($rect.L + $rect.R) / 2)
+    $cy = [int](($rect.T + $rect.B) / 2)
+    [Win32Fg]::PostWheel($Hwnd, $Delta, $cx, $cy) | Out-Null
 }
 
 # --- 1. isolate environment ------------------------------------------------
@@ -215,6 +236,41 @@ try {
             ShootHwnd $hwnd ("smoke-{0:D2}-{1}.png" -f ($s + 2), ($want[$s] -replace '\.', '-'))
         }
 
+        # --- 4b. wheel navigation: prev then next --------------------------
+        # Now on corrupt.gif after two Right presses. With defaults
+        # (wheel_navigation = true, no Ctrl) a positive wheel notch maps to
+        # `prev` and a negative one to `next`, so one notch up must land back on
+        # 8k.png and one notch down must return to corrupt.gif.
+        $wheelChecks = @(
+            @{ Name = 'up (prev)'; Delta = 120; Want = '8k.png' },
+            @{ Name = 'down (next)'; Delta = -120; Want = 'corrupt.gif' }
+        )
+        for ($wc = 0; $wc -lt $wheelChecks.Count; $wc++) {
+            $chk = $wheelChecks[$wc]
+            $reflected = $false
+            $attempts = 0
+            $reason = ''
+            while ($attempts -lt 5 -and -not $reflected) {
+                $attempts++
+                [Win32Fg]::Force($hwnd) | Out-Null
+                Start-Sleep -Milliseconds 400
+                SendWheel $hwnd $chk.Delta
+                for ($w = 0; $w -lt 12; $w++) {
+                    Start-Sleep -Milliseconds 1000
+                    $proc.Refresh()
+                    if ($proc.HasExited) { break }
+                    if ($proc.MainWindowTitle -like ("*" + $chk.Want + "*")) { $reflected = $true; break }
+                }
+                if (-not $reflected) { $reason = 'title did not change' }
+            }
+            if ($reflected) {
+                Ok "wheel $($chk.Name): reflected to $($chk.Want) after $attempts attempt(s)"
+            } else {
+                Fail "wheel $($chk.Name): not reflected after $attempts attempt(s) ($reason)"
+            }
+            ShootHwnd $hwnd ("smoke-04-wheel-{0}.png" -f $wc)
+        }
+
         # --- 5. still alive after the whole run ----------------------------
         $proc.Refresh()
         if ($proc.HasExited) { Fail "liveness: app exited (code $($proc.ExitCode))" }
@@ -249,7 +305,7 @@ Remove-Item -LiteralPath $iso -Recurse -Force -ErrorAction SilentlyContinue
 # --- 7. summary -----------------------------------------------------------
 Write-Output ''
 if ($script:Failures.Count -eq 0) {
-    Write-Output "PASS: gui-smoke ($($want.Count) transitions verified)"
+    Write-Output "PASS: gui-smoke ($($want.Count + 2) transitions verified)"
     exit 0
 } else {
     Write-Output "FAIL: gui-smoke ($($script:Failures.Count) failure(s))"
