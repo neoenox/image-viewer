@@ -97,6 +97,12 @@ workers only, not rendering or texture upload:
 cargo test --release loader::bench -- --ignored --nocapture --test-threads=1
 ```
 
+## Local verification scripts
+
+Windows helper scripts for preflight checks, generating the acceptance images,
+the GUI smoke test and file association are documented in
+[scripts/README.md](scripts/README.md).
+
 ## Source layout
 
 - `files.rs`: supported formats, folder scanning, natural ordering.
