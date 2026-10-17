@@ -55,6 +55,7 @@ public static class Win32Fg {
     [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr h, IntPtr dc, uint f);
     [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
     [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint msg, IntPtr w, IntPtr l);
+    [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr h);
     [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L; public int T; public int R; public int B; }
     // One WM_MOUSEWHEEL notch (WHEEL_DELTA = 120) posted straight to the HWND.
     // Injected wheel input is routed by the OS to whatever window the cursor
@@ -129,6 +130,36 @@ function SendWheel($Hwnd, [int]$Delta) {
     $cx = [int](($rect.L + $rect.R) / 2)
     $cy = [int](($rect.T + $rect.B) / 2)
     [Win32Fg]::PostWheel($Hwnd, $Delta, $cx, $cy) | Out-Null
+}
+
+# Re-acquire the app's main window. The handle cached during `identify` can be
+# destroyed, or simply stop being enumerable, while the process is still alive
+# (observed when the desktop session changes mid-run): MainWindowHandle then
+# reads zero and the cached handle fails IsWindow. Returns $null if the process
+# exited, a usable handle otherwise, or [IntPtr]::Zero if it is alive but has no
+# reachable window right now.
+function Resolve-AppWindow($Proc, [IntPtr]$Hint) {
+    $Proc.Refresh()
+    if ($Proc.HasExited) { return $null }
+    $cur = $Proc.MainWindowHandle
+    if ($cur -ne [IntPtr]::Zero) { return $cur }
+    if ($Hint -ne [IntPtr]::Zero -and [Win32Fg]::IsWindow($Hint)) { return $Hint }
+    return [IntPtr]::Zero
+}
+
+# One focus attempt against the live window. Returns 'ok' once the foreground is
+# confirmed, otherwise a precise reason. This replaces the old catch-all
+# 'focus not confirmed', which conflated a stale handle, a hidden window and a
+# dead process. $Hwnd is updated in place when the window had to be re-acquired.
+function Invoke-FocusAttempt($Proc, [ref]$Hwnd) {
+    $w = Resolve-AppWindow $Proc $Hwnd.Value
+    if ($null -eq $w) { return 'app exited' }
+    if ($w -eq [IntPtr]::Zero) { return 'window unavailable (process alive)' }
+    $Hwnd.Value = $w
+    [Win32Fg]::Force($w) | Out-Null
+    Start-Sleep -Milliseconds 400
+    if (-not [Win32Fg]::IsFg($w)) { return 'focus not confirmed' }
+    return 'ok'
 }
 
 # --- 1. isolate environment ------------------------------------------------
@@ -215,18 +246,22 @@ try {
             $reason = ''
             while ($attempts -lt 5 -and -not $reflected) {
                 $attempts++
-                [Win32Fg]::Force($hwnd) | Out-Null
-                Start-Sleep -Milliseconds 500
-                if (-not [Win32Fg]::IsFg($hwnd)) { $reason = 'focus not confirmed'; continue }
+                $reason = ''
+                $focus = Invoke-FocusAttempt $proc ([ref]$hwnd)
+                if ($focus -ne 'ok') {
+                    $reason = $focus
+                    if ($focus -eq 'app exited') { break }
+                    continue
+                }
                 [System.Windows.Forms.SendKeys]::SendWait('{RIGHT}')
                 # Wait (bounded) for the title to reflect the new image.
                 for ($w = 0; $w -lt 12; $w++) {
                     Start-Sleep -Milliseconds 1000
                     $proc.Refresh()
-                    if ($proc.HasExited) { break }
+                    if ($proc.HasExited) { $reason = 'app exited'; break }
                     if ($proc.MainWindowTitle -like ("*" + $want[$s] + "*")) { $reflected = $true; break }
                 }
-                if (-not $reflected) { $reason = 'title did not change' }
+                if (-not $reflected -and -not $reason) { $reason = 'title did not change' }
             }
             if ($reflected) {
                 Ok "$stage`: reflected after $attempts attempt(s)"
@@ -252,16 +287,21 @@ try {
             $reason = ''
             while ($attempts -lt 5 -and -not $reflected) {
                 $attempts++
-                [Win32Fg]::Force($hwnd) | Out-Null
-                Start-Sleep -Milliseconds 400
+                $reason = ''
+                $focus = Invoke-FocusAttempt $proc ([ref]$hwnd)
+                if ($focus -ne 'ok') {
+                    $reason = $focus
+                    if ($focus -eq 'app exited') { break }
+                    continue
+                }
                 SendWheel $hwnd $chk.Delta
                 for ($w = 0; $w -lt 12; $w++) {
                     Start-Sleep -Milliseconds 1000
                     $proc.Refresh()
-                    if ($proc.HasExited) { break }
+                    if ($proc.HasExited) { $reason = 'app exited'; break }
                     if ($proc.MainWindowTitle -like ("*" + $chk.Want + "*")) { $reflected = $true; break }
                 }
-                if (-not $reflected) { $reason = 'title did not change' }
+                if (-not $reflected -and -not $reason) { $reason = 'title did not change' }
             }
             if ($reflected) {
                 Ok "wheel $($chk.Name): reflected to $($chk.Want) after $attempts attempt(s)"
@@ -273,8 +313,16 @@ try {
 
         # --- 5. still alive after the whole run ----------------------------
         $proc.Refresh()
-        if ($proc.HasExited) { Fail "liveness: app exited (code $($proc.ExitCode))" }
-        else { Ok 'liveness: app alive at end' }
+        if ($proc.HasExited) {
+            Fail "liveness: app exited (code $($proc.ExitCode))"
+        } elseif ($proc.MainWindowHandle -eq [IntPtr]::Zero) {
+            # Process alive but its window is no longer reachable: an environment
+            # condition (window/desktop moved mid-run), not a product defect, so
+            # it is reported without failing a run whose transitions all passed.
+            Write-Output 'note: liveness: process alive but window no longer reachable'
+        } else {
+            Ok 'liveness: app alive at end'
+        }
     }
 } finally {
     if ($proc -and -not $proc.HasExited) { Stop-Process -Id $proc.Id -Force }
