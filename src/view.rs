@@ -9,7 +9,13 @@ use std::time::{Duration, Instant};
 pub(crate) const THUMBNAIL_PANEL_WIDTH: f32 = 156.0;
 
 /// Pointer distance from the top edge that reveals the auto-hidden toolbar.
-const TOOLBAR_REVEAL_ZONE: f32 = 48.0;
+pub(crate) const TOOLBAR_REVEAL_ZONE: f32 = 48.0;
+
+/// ポインタが上端の表示ゾーン内にあるか（自動非表示ツールバーの再表示条件）。
+/// 横位置は関係なく、上端からの距離だけで決まる。
+fn pointer_reveals_toolbar(hover: Option<egui::Pos2>) -> bool {
+    hover.is_some_and(|p| p.y < TOOLBAR_REVEAL_ZONE)
+}
 
 impl eframe::App for ViewerApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
@@ -29,35 +35,11 @@ impl eframe::App for ViewerApp {
         self.handle_wheel_nav(ctx);
         self.tick_slideshow(ctx);
 
-        let title = match self.current_path() {
-            Some(p) => format!(
-                "{} - 画像ビューワー",
-                p.file_name()
-                    .map(|s| s.to_string_lossy().into_owned())
-                    .unwrap_or_default()
-            ),
-            None => "画像ビューワー".to_owned(),
-        };
-        // Only on change: every viewport command requests another frame, so sending
-        // it unconditionally kept the UI repainting (one CPU core busy while idle).
-        if self.window_title != title {
-            self.window_title = title.clone();
-            ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
-        }
+        self.sync_window_title(ctx);
 
         // ---- ツールバー ----
-        let near_top = ctx.input(|i| {
-            i.pointer
-                .hover_pos()
-                .is_some_and(|p| p.y < TOOLBAR_REVEAL_ZONE)
-        });
-        if !self.settings.auto_hide_toolbar
-            || self.toolbar_pinned
-            || near_top
-            || self.files.is_empty()
-            || self.show_settings
-            || self.show_assoc
-        {
+        let near_top = ctx.input(|i| pointer_reveals_toolbar(i.pointer.hover_pos()));
+        if self.toolbar_visible(near_top) {
             egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
                 ui.horizontal_wrapped(|ui| {
                     if ui
@@ -460,6 +442,41 @@ impl eframe::App for ViewerApp {
 }
 
 impl ViewerApp {
+    /// ウィンドウタイトルに出す文字列。ファイルを開いていればファイル名を前置する。
+    fn window_title_text(&self) -> String {
+        match self.current_path() {
+            Some(p) => format!(
+                "{} - 画像ビューワー",
+                p.file_name()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            ),
+            None => "画像ビューワー".to_owned(),
+        }
+    }
+
+    /// タイトルをウィンドウへ送る。変わったときだけ送る：viewportコマンドは
+    /// どれも次フレームを要求するため、毎フレーム送るとアイドル中も再描画が
+    /// 続き、CPUを1コア占有する。
+    fn sync_window_title(&mut self, ctx: &egui::Context) {
+        let title = self.window_title_text();
+        if self.window_title != title {
+            self.window_title = title.clone();
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
+        }
+    }
+
+    /// ツールバーを表示するか。自動非表示が有効でも、固定中・ポインタが上端付近・
+    /// ファイル未読込・設定／関連付けダイアログの表示中は表示する。
+    pub(crate) fn toolbar_visible(&self, pointer_near_top: bool) -> bool {
+        !self.settings.auto_hide_toolbar
+            || self.toolbar_pinned
+            || pointer_near_top
+            || self.files.is_empty()
+            || self.show_settings
+            || self.show_assoc
+    }
+
     fn settings_window(&mut self, ctx: &egui::Context) {
         if !self.show_settings {
             return;
