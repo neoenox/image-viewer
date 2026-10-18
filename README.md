@@ -101,7 +101,10 @@ cargo test --release loader::bench -- --ignored --nocapture --test-threads=1
 
 Windows helper scripts for preflight checks, generating the acceptance images,
 the GUI smoke test and file association are documented in
-[scripts/README.md](scripts/README.md).
+[scripts/README.md](scripts/README.md). The GUI smoke test also runs nightly, and
+on demand, in `.github/workflows/gui-smoke.yml`; that workflow is not a
+`pull_request` check, so a red run there is a triage signal rather than a merge
+blocker.
 
 ## Source layout
 

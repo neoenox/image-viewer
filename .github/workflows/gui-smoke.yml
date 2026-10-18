@@ -1,0 +1,159 @@
+name: GUI Smoke (scheduled)
+
+# Scheduled / on-demand safety net for the real-window GUI smoke test in
+# scripts/gui-smoke.ps1. That script drives the real window with injected input
+# and PrintWindow captures, which is inherently more timing- and
+# desktop-dependent than the unit/bench gates in ci.yml. It is therefore
+# deliberately NOT wired to pull_request: ci.yml stays the PR gate, and a red run
+# here is a triage signal ("look at the screenshots"), not a merge blocker.
+#
+# Trigger it by hand with:
+#   gh workflow run gui-smoke.yml --ref main
+#   gh workflow run gui-smoke.yml --ref main -f contend_focus=true   # stress run
+# Artifacts land in the run's "gui-smoke-<run id>" artifact: the window
+# screenshots, target/gui-smoke.log (the script's full output, including the
+# isolated-settings before/after diff) and the generated input images.
+on:
+  schedule:
+    # Daily at 18:17 UTC = 03:17 JST. Off the top of the hour so it does not
+    # queue behind the top-of-hour cron crowd.
+    - cron: "17 18 * * *"
+  workflow_dispatch:
+    inputs:
+      contend_focus:
+        description: "Steal the foreground during the run (-ContendFocus) to prove the focus-confirm retry loop recovers"
+        type: boolean
+        default: false
+
+# Read-only: this workflow runs a local exe and uploads artifacts, it never
+# touches the repository or the API.
+permissions:
+  contents: read
+
+jobs:
+  gui-smoke:
+    # Stated explicitly so a red run is not mistaken for a PR blocker.
+    name: GUI smoke - scheduled check, not a PR gate
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # scripts/gui-smoke.ps1 defaults to target/debug/image-viewer.exe, so build
+      # the debug bin the script expects (same build shape as the test job in
+      # ci.yml). The assertions are window-title transitions driven by previews
+      # capped at 2048 px, so a debug build is fast enough.
+      - name: Build debug exe for the smoke run
+        run: cargo build --locked
+
+      # The script opens <ImgDir>/4k.png and then navigates into 8k.png and
+      # corrupt.gif, so the #48 acceptance images must exist first.
+      - name: Generate acceptance images
+        shell: pwsh
+        run: pwsh -NoProfile -File scripts/new-acceptance-images.ps1
+
+      # Triage aid only. If a runner has no interactive desktop the smoke step
+      # fails in ways that are otherwise hard to tell apart from a product bug;
+      # this prints the facts needed to classify the failure. It never changes
+      # the job outcome.
+      - name: Environment probe (desktop availability, triage only)
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          Write-Output "UserInteractive: $([Environment]::UserInteractive)"
+          Write-Output "SessionId: $((Get-Process -Id $PID).SessionId)"
+          try {
+            Add-Type -AssemblyName System.Windows.Forms
+            $form = New-Object System.Windows.Forms.Form
+            $form.Text = 'gui-smoke probe'
+            $form.Show()
+            Write-Output "probe window created: yes (handle $($form.Handle))"
+            $form.Close()
+            $form.Dispose()
+          } catch {
+            Write-Output "probe window created: no ($($_.Exception.Message))"
+          }
+
+      - name: Run GUI smoke (identify / focus / input / reflect)
+        id: smoke
+        shell: pwsh
+        run: |
+          # The runner sets $ErrorActionPreference = 'stop' for pwsh steps, which
+          # turns redirected native stderr into a terminating error. The smoke
+          # script reports failures on stdout and signals through its exit code,
+          # so relax EAP here and decide this step's outcome from $LASTEXITCODE.
+          $ErrorActionPreference = 'Continue'
+
+          Write-Output 'GUI smoke: scheduled/on-demand real-window check - a failure here is NOT a PR blocker (ci.yml is the PR gate).'
+
+          New-Item -ItemType Directory -Path target -Force | Out-Null
+          $log = 'target/gui-smoke.log'
+
+          # Exact parameter names / default paths from scripts/gui-smoke.ps1's
+          # param() block: -Exe, -ImgDir, -ShotDir, -ContendFocus.
+          $smokeArgs = @(
+            '-NoProfile'
+            '-File', 'scripts/gui-smoke.ps1'
+            '-Exe', 'target/debug/image-viewer.exe'
+            '-ImgDir', 'target/acceptance'
+            '-ShotDir', 'target/gui-shots'
+          )
+          if ('${{ inputs.contend_focus }}' -eq 'true') {
+            $smokeArgs += '-ContendFocus'
+            Write-Output 'note: -ContendFocus requested; the run repeatedly steals the foreground.'
+          }
+
+          # Tee so the full output survives in the artifact even when the script
+          # dies mid-run (e.g. SendKeys throws on a non-interactive window
+          # station, which skips the script's own summary).
+          & pwsh @smokeArgs 2>&1 | Tee-Object -FilePath $log
+          $code = $LASTEXITCODE
+          if ($null -eq $code) { $code = 1 }
+
+          # Surface the script's own summary (PASS/FAIL plus each named failed
+          # stage and its reason) in the log and in the run summary. Guarded on
+          # Test-Path: Select-String fails to bind a path that does not exist, and
+          # on a hard failure (no window station) the log may be absent.
+          $summary = @()
+          if (Test-Path -LiteralPath $log) {
+            $summary = @(Select-String -Path $log -Pattern '^(PASS|FAIL): gui-smoke|^  - ' | ForEach-Object { $_.Line })
+          }
+          Write-Output ''
+          Write-Output "gui-smoke exit code: $code"
+          $summary | ForEach-Object { Write-Output $_ }
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value @(
+            '## GUI smoke (scheduled check, not a PR gate)'
+            ''
+            "- ``scripts/gui-smoke.ps1`` exit code: $code"
+            "- artifacts: ``gui-smoke-${{ github.run_id }}`` (screenshots, ``target/gui-smoke.log``, input images)"
+            ''
+            '```'
+            ($summary -join "`n")
+            '```'
+          )
+
+          if ($code -ne 0) {
+            Write-Output "FAIL: gui-smoke exited $code - the window screenshots and the full log are in the gui-smoke-${{ github.run_id }} artifact."
+          }
+          exit $code
+
+      # if: always() so a failed smoke run still ships the screenshots and log.
+      # The isolated settings file is diffed (hash before/after) and printed into
+      # target/gui-smoke.log; the script deletes the throwaway directory itself
+      # before exiting, so the log is the record of that check.
+      - name: Upload smoke artifacts (screenshots, log, input images)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gui-smoke-${{ github.run_id }}
+          path: |
+            target/gui-shots/**
+            target/gui-smoke.log
+            target/acceptance/*.png
+            target/acceptance/*.gif
+          if-no-files-found: warn
+          retention-days: 14
