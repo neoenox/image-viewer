@@ -659,6 +659,149 @@ mod tests {
         PathBuf::from(format!("thumb-{i:03}.png"))
     }
 
+    // ---------------------------------------------------------------
+    // ヘッドレス駆動のヘルパー。実物の `App::update` をウィンドウ無しで
+    // 1フレーム分動かし、コードが実際に作った状態だけを見る。
+    // ---------------------------------------------------------------
+
+    /// 決定的なフレーム入力。画面サイズとポインタ位置だけを指定する。
+    fn raw_input(size: egui::Vec2, hover: Option<egui::Pos2>) -> egui::RawInput {
+        let mut raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+            ..Default::default()
+        };
+        if let Some(pos) = hover {
+            raw.events.push(egui::Event::PointerMoved(pos));
+        }
+        raw
+    }
+
+    /// `ViewerApp::update` を1フレーム駆動して出力を返す。
+    fn update_frame(
+        app: &mut ViewerApp,
+        ctx: &egui::Context,
+        raw: egui::RawInput,
+    ) -> egui::FullOutput {
+        let mut frame = eframe::Frame::_new_kittest();
+        ctx.run(raw, |ctx| eframe::App::update(app, ctx, &mut frame))
+    }
+
+    /// ウィンドウ（`Area`）は初回フレームでは寸法を測るだけで描かれないため、
+    /// 2フレーム目を駆動してその出力を返す。
+    fn update_frame_settled(
+        app: &mut ViewerApp,
+        ctx: &egui::Context,
+        raw: egui::RawInput,
+    ) -> egui::FullOutput {
+        let _ = update_frame(app, ctx, raw.clone());
+        update_frame(app, ctx, raw)
+    }
+
+    /// このフレームでウィンドウへ送られたタイトル（`ViewportCommand::Title`）。
+    fn sent_titles(output: &egui::FullOutput) -> Vec<String> {
+        output
+            .viewport_output
+            .get(&egui::ViewportId::ROOT)
+            .map(|viewport| {
+                viewport
+                    .commands
+                    .iter()
+                    .filter_map(|command| match command {
+                        egui::ViewportCommand::Title(title) => Some(title.clone()),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// 実際に描画されたテキスト（レイアウト結果の galley）を集める。
+    /// ピクセル比較ではなく、どのラベルが配置されたかを見る。
+    fn rendered_text(output: &egui::FullOutput) -> Vec<String> {
+        fn walk(shape: &egui::Shape, out: &mut Vec<String>) {
+            match shape {
+                egui::Shape::Text(text) => out.push(text.galley.text().to_owned()),
+                egui::Shape::Vec(shapes) => {
+                    for shape in shapes {
+                        walk(shape, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        for clipped in &output.shapes {
+            walk(&clipped.shape, &mut out);
+        }
+        out
+    }
+
+    /// 描画テキストに `needle` を含むラベルが1つでもあるか。
+    fn shows(output: &egui::FullOutput, needle: &str) -> bool {
+        rendered_text(output)
+            .iter()
+            .any(|text| text.contains(needle))
+    }
+
+    fn solid(path: &std::path::Path, w: u32, h: u32, rgb: [u8; 3]) {
+        image::RgbaImage::from_pixel(w, h, image::Rgba([rgb[0], rgb[1], rgb[2], 255]))
+            .save(path)
+            .unwrap();
+    }
+
+    /// a/b/c.png と壊れた d.png を持つ独立フィクスチャ（名前順で決定的）。
+    fn fixture_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("iv-view-{}-{tag}", std::process::id()));
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir).ok();
+        }
+        std::fs::create_dir_all(&dir).unwrap();
+        solid(&dir.join("a.png"), 100, 80, [200, 30, 30]);
+        solid(&dir.join("b.png"), 60, 60, [30, 30, 200]);
+        solid(&dir.join("c.png"), 40, 30, [30, 200, 30]);
+        std::fs::write(dir.join("d.png"), b"not an image at all").unwrap();
+        dir
+    }
+
+    /// `img-0000.png`.. の連番画像を `n` 枚持つフォルダ。
+    fn numbered_dir(tag: &str, n: usize) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("iv-view-{}-{tag}", std::process::id()));
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir).ok();
+        }
+        std::fs::create_dir_all(&dir).unwrap();
+        for i in 0..n {
+            solid(&dir.join(format!("img-{i:04}.png")), 24, 18, [9, 9, 9]);
+        }
+        dir
+    }
+
+    fn headless_ctx() -> egui::Context {
+        egui::Context::default()
+    }
+
+    /// バックグラウンド読込が終わるまで待つ（実時間は短いが待ちは有限）。
+    fn settle(app: &mut ViewerApp, ctx: &egui::Context) {
+        let start = Instant::now();
+        while app.is_loading() {
+            app.poll_loading(ctx);
+            assert!(
+                start.elapsed() < Duration::from_secs(15),
+                "background loading timed out"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    fn open(app: &mut ViewerApp, ctx: &egui::Context, path: PathBuf) {
+        app.open_path(path, Some(ctx));
+        settle(app, ctx);
+    }
+
+    // ---------------------------------------------------------------
+    // ツールバー表示判定
+    // ---------------------------------------------------------------
+
     #[test]
     fn thumb_recency_evicts_oldest_past_cap() {
         let mut app = ViewerApp::new(None);
@@ -684,5 +827,450 @@ mod tests {
         assert!(!app.thumb_retained.contains(&thumb_path(6)));
         assert!(app.thumb_retained.contains(&thumb_path(70)));
         assert!(app.thumb_retained.contains(&thumb_path(133)));
+    }
+
+    #[test]
+    fn repeated_visible_paths_are_recorded_once() {
+        // 同じ可視パスが1フレームに複数回来ても LRU は重複しない（MRU順は最後）。
+        let mut app = ViewerApp::new(None);
+        app.retain_visible_thumbs(vec![
+            thumb_path(0),
+            thumb_path(0),
+            thumb_path(1),
+            thumb_path(0),
+        ]);
+        assert_eq!(app.thumb_lru.len(), 2);
+        assert_eq!(app.thumb_lru.back(), Some(&thumb_path(0)));
+        assert_eq!(app.thumb_retained.len(), 2);
+    }
+
+    #[test]
+    fn toolbar_visible_truth_table() {
+        // 自動非表示OFFなら無条件に表示。
+        let mut app = ViewerApp::new(None);
+        app.settings.auto_hide_toolbar = false;
+        assert!(app.toolbar_visible(false));
+        assert!(app.toolbar_visible(true));
+
+        // 自動非表示ON・ファイルあり・ポインタは上端から離れている → 隠れる。
+        app.settings.auto_hide_toolbar = true;
+        app.files = vec![PathBuf::from("a.png")];
+        assert!(!app.toolbar_visible(false));
+
+        // 個別条件はそれぞれ単独で表示を強制する。
+        assert!(app.toolbar_visible(true), "pointer near the top");
+        app.toolbar_pinned = true;
+        assert!(app.toolbar_visible(false), "pinned with Tab");
+        app.toolbar_pinned = false;
+        app.files.clear();
+        assert!(app.toolbar_visible(false), "nothing open");
+        app.files = vec![PathBuf::from("a.png")];
+        app.show_settings = true;
+        assert!(app.toolbar_visible(false), "settings window open");
+        app.show_settings = false;
+        app.show_assoc = true;
+        assert!(app.toolbar_visible(false), "association dialog open");
+    }
+
+    #[test]
+    fn toolbar_reveal_zone_boundary() {
+        // 上端から TOOLBAR_REVEAL_ZONE 未満だけが再表示ゾーン。横位置は無関係。
+        assert!(!pointer_reveals_toolbar(None));
+        assert!(pointer_reveals_toolbar(Some(egui::pos2(
+            400.0,
+            TOOLBAR_REVEAL_ZONE - 0.5
+        ))));
+        assert!(!pointer_reveals_toolbar(Some(egui::pos2(
+            400.0,
+            TOOLBAR_REVEAL_ZONE
+        ))));
+        assert!(pointer_reveals_toolbar(Some(egui::pos2(2000.0, 0.0))));
+    }
+
+    #[test]
+    fn toolbar_hides_and_reveals_with_pointer() {
+        // update() を丸ごと動かし、中央領域の上端が実際にツールバー分ずれることを見る。
+        let dir = fixture_dir("toolbar");
+        let ctx = headless_ctx();
+        let mut app = ViewerApp::new(None);
+        open(&mut app, &ctx, dir.join("a.png"));
+        let size = egui::vec2(800.0, 600.0);
+
+        // ポインタが上端から離れている → ツールバー無し、中央領域は上端から始まる。
+        let out = update_frame(
+            &mut app,
+            &ctx,
+            raw_input(size, Some(egui::pos2(400.0, 500.0))),
+        );
+        let hidden_top = app.view_rect.top();
+        assert!(hidden_top < 12.0, "top={hidden_top}");
+        assert!(!shows(&out, "設定"), "toolbar buttons must not be drawn");
+
+        // ポインタが再表示ゾーン内 → ツールバーが上端を占有する。
+        let out = update_frame(
+            &mut app,
+            &ctx,
+            raw_input(size, Some(egui::pos2(400.0, TOOLBAR_REVEAL_ZONE - 1.0))),
+        );
+        assert!(
+            app.view_rect.top() > hidden_top + 10.0,
+            "revealed top={} hidden top={hidden_top}",
+            app.view_rect.top()
+        );
+        assert!(shows(&out, "設定"), "toolbar buttons must be drawn");
+
+        // Tab固定中はポインタが離れても表示されたまま。
+        app.toolbar_pinned = true;
+        let _ = update_frame(
+            &mut app,
+            &ctx,
+            raw_input(size, Some(egui::pos2(400.0, 500.0))),
+        );
+        assert!(
+            app.view_rect.top() > hidden_top + 10.0,
+            "pinned toolbar must stay"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn empty_state_shows_the_toolbar_too() {
+        // 画像が無いときは「開く」に到達できるよう常に表示する。
+        let ctx = headless_ctx();
+        let mut app = ViewerApp::new(None);
+        assert!(app.files.is_empty());
+        let out = update_frame(&mut app, &ctx, raw_input(egui::vec2(800.0, 600.0), None));
+        assert!(app.view_rect.top() > 20.0, "top={}", app.view_rect.top());
+        assert!(shows(&out, "設定"));
+    }
+
+    // ---------------------------------------------------------------
+    // ウィンドウタイトル
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn window_title_only_sent_on_change() {
+        // 再描画ストームの回帰: 同じタイトルを毎フレーム送らない。
+        let dir = fixture_dir("title");
+        let ctx = headless_ctx();
+        let mut app = ViewerApp::new(None);
+        let size = egui::vec2(800.0, 600.0);
+
+        let out = update_frame(&mut app, &ctx, raw_input(size, None));
+        assert_eq!(app.window_title, "画像ビューワー");
+        assert_eq!(sent_titles(&out), vec!["画像ビューワー".to_owned()]);
+
+        // 2フレーム目は変化なし → コマンドを送らない。
+        let out = update_frame(&mut app, &ctx, raw_input(size, None));
+        assert!(
+            sent_titles(&out).is_empty(),
+            "unchanged title must not be re-sent: {:?}",
+            sent_titles(&out)
+        );
+
+        // ファイルを開くと新しいタイトルが1回だけ送られる。
+        app.open_path(dir.join("a.png"), Some(&ctx));
+        settle(&mut app, &ctx);
+        let out = update_frame(&mut app, &ctx, raw_input(size, None));
+        assert_eq!(app.window_title, "a.png - 画像ビューワー");
+        assert_eq!(sent_titles(&out), vec!["a.png - 画像ビューワー".to_owned()]);
+        let out = update_frame(&mut app, &ctx, raw_input(size, None));
+        assert!(sent_titles(&out).is_empty());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ---------------------------------------------------------------
+    // ステータスバー / 中央領域の状態表示
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn empty_folder_renders_open_hint() {
+        let ctx = headless_ctx();
+        let mut app = ViewerApp::new(None);
+        let out = update_frame(&mut app, &ctx, raw_input(egui::vec2(800.0, 600.0), None));
+        assert!(shows(&out, "画像がありません"));
+        assert!(shows(
+            &out,
+            "画像を開いてください（ドラッグ＆ドロップ / Ctrl+O）"
+        ));
+        assert!(shows(&out, "上端:操作 / Tab:固定 / T:一覧"));
+        assert!(!shows(&out, "フィット"));
+    }
+
+    #[test]
+    fn loading_state_renders_progress() {
+        let ctx = headless_ctx();
+        let mut app = ViewerApp::new(None);
+        app.files = vec![PathBuf::from("pending.png")];
+        app.loading = true;
+        let out = update_frame(&mut app, &ctx, raw_input(egui::vec2(800.0, 600.0), None));
+        assert!(shows(&out, "読み込み中"));
+        assert!(shows(&out, "読み込み中…"));
+        assert!(!shows(&out, "画像がありません"));
+    }
+
+    #[test]
+    fn load_error_renders_message() {
+        let dir = fixture_dir("error");
+        let ctx = headless_ctx();
+        let mut app = ViewerApp::new(None);
+        // 壊れたファイルを実際に開く（d.png は画像ではない）。
+        open(&mut app, &ctx, dir.join("d.png"));
+        let error = app
+            .load_error()
+            .expect("corrupt file must report an error")
+            .to_owned();
+        assert!(error.starts_with("開けませんでした"));
+        let out = update_frame(&mut app, &ctx, raw_input(egui::vec2(800.0, 600.0), None));
+        assert!(shows(&out, &error));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn status_bar_reflects_view_state() {
+        let dir = fixture_dir("status");
+        let ctx = headless_ctx();
+        let mut app = ViewerApp::new(None);
+        open(&mut app, &ctx, dir.join("a.png")); // 100x80、4枚中1枚目
+        let out = update_frame(&mut app, &ctx, raw_input(egui::vec2(800.0, 600.0), None));
+        assert!(shows(&out, "a.png  (1/4)"));
+        assert!(shows(&out, "100×80"));
+        assert!(shows(&out, "フィット"));
+        assert!(!shows(&out, "90°"));
+
+        // 回転は寸法の入れ替えと角度表示に反映される。
+        app.rotate_cw(&ctx);
+        let out = update_frame(&mut app, &ctx, raw_input(egui::vec2(800.0, 600.0), None));
+        assert!(shows(&out, "80×100"));
+        assert!(shows(&out, "90°"));
+
+        // 手動ズームは倍率表示（フィット表示は消える）。倍率は絶対値なので
+        // 状態から期待値を組み立て、ステータスバーが追従しているかを見る。
+        app.zoom_centered(1.25);
+        assert!(!app.is_fit());
+        let expected = format!("{:.0}%", app.zoom_level() * 100.0);
+        let out = update_frame(&mut app, &ctx, raw_input(egui::vec2(800.0, 600.0), None));
+        assert!(shows(&out, &expected), "expected {expected}");
+        assert!(!shows(&out, "フィット"));
+
+        // 再生中は状態が出る。
+        app.slideshow = true;
+        let out = update_frame(&mut app, &ctx, raw_input(egui::vec2(800.0, 600.0), None));
+        assert!(shows(&out, "再生中"));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ---------------------------------------------------------------
+    // 設定ウィンドウ / 関連付けダイアログ
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn settings_window_renders_and_reflects_settings() {
+        let dir = fixture_dir("settings");
+        let ctx = headless_ctx();
+        let mut app = ViewerApp::new(None);
+        app.show_settings = true;
+        app.settings.wheel_navigation = true;
+        let size = egui::vec2(800.0, 600.0);
+
+        let out = update_frame_settled(&mut app, &ctx, raw_input(size, None));
+        assert!(shows(&out, "操作設定"));
+        assert!(shows(
+            &out,
+            "ホイール:前後 / Ctrl+ホイール:拡大縮小 / ドラッグ:視点移動"
+        ));
+        assert!(shows(&out, "設定はこの起動中に適用されます。"));
+        // 開いただけでは設定を書き換えない。
+        assert!(!app.window_state_dirty);
+
+        // ホイール移動OFFと保存先ありで、説明文と保存先の案内が切り替わる。
+        app.settings.wheel_navigation = false;
+        app.settings_path = Some(dir.join("settings.txt"));
+        let out = update_frame_settled(&mut app, &ctx, raw_input(size, None));
+        assert!(shows(&out, "ホイール:拡大縮小 / ドラッグ:視点移動"));
+        assert!(shows(
+            &out,
+            "設定は自動で保存され、次回の起動時にも使われます。"
+        ));
+        assert!(!app.window_state_dirty);
+        assert!(
+            !dir.join("settings.txt").exists(),
+            "rendering must not persist settings"
+        );
+
+        // ダイアログを閉じた状態では描画されない。
+        app.show_settings = false;
+        let out = update_frame_settled(&mut app, &ctx, raw_input(size, None));
+        assert!(!shows(&out, "操作設定"));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn settings_window_releases_the_peek_when_disabled() {
+        // 中ボタン拡大中に「中ボタンで拡大」をOFFにしたら元へ戻る。
+        let ctx = headless_ctx();
+        let mut app = ViewerApp::new(None);
+        let avail = egui::vec2(1000.0, 700.0);
+        assert!(app.begin_peek(avail, 3000.0, 2000.0));
+        assert!(!app.is_fit());
+
+        app.show_settings = true;
+        app.settings.hold_to_peek = false;
+        let _ = update_frame(&mut app, &ctx, raw_input(egui::vec2(800.0, 600.0), None));
+        assert!(app.is_fit());
+        assert!(app.peek_saved.is_none());
+    }
+
+    #[test]
+    fn assoc_dialog_renders_status_count() {
+        let ctx = headless_ctx();
+        let mut app = ViewerApp::new(None);
+        app.refresh_assoc_status();
+        let done = app.assoc_status.iter().filter(|(_, ok)| *ok).count();
+        let total = app.assoc_status.len();
+        assert_eq!(total, SUPPORTED_EXTS.len());
+
+        app.show_assoc = true;
+        let out = update_frame_settled(&mut app, &ctx, raw_input(egui::vec2(800.0, 600.0), None));
+        assert!(shows(&out, "ファイル関連付け"));
+        assert!(shows(&out, &format!("関連付け: {done}/{total} 済み")));
+        assert!(shows(
+            &out,
+            "登録後に設定画面が開くので、各形式をクリックして確定。"
+        ));
+
+        app.show_assoc = false;
+        let out = update_frame_settled(&mut app, &ctx, raw_input(egui::vec2(800.0, 600.0), None));
+        assert!(!shows(&out, "ファイル関連付け"));
+    }
+
+    // ---------------------------------------------------------------
+    // サムネイルパネル
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn thumbnail_panel_hidden_releases_caches() {
+        let dir = fixture_dir("thumbclose");
+        let ctx = headless_ctx();
+        let mut app = ViewerApp::new(None);
+        open(&mut app, &ctx, dir.join("a.png"));
+        let size = egui::vec2(800.0, 600.0);
+
+        app.show_thumbnails = true;
+        let out = update_frame(
+            &mut app,
+            &ctx,
+            raw_input(size, Some(egui::pos2(400.0, 300.0))),
+        );
+        assert!(shows(&out, "画像一覧"));
+        assert!(!app.thumb_retained.is_empty());
+        app.thumbnails.insert(
+            dir.join("a.png"),
+            ctx.load_texture(
+                "probe-thumb",
+                egui::ColorImage::filled([2, 2], egui::Color32::WHITE),
+                egui::TextureOptions::LINEAR,
+            ),
+        );
+
+        app.show_thumbnails = false;
+        let out = update_frame(&mut app, &ctx, raw_input(size, None));
+        assert!(app.thumbnails.is_empty());
+        assert!(app.thumb_retained.is_empty());
+        assert!(app.thumb_lru.is_empty());
+        assert!(!shows(&out, "画像一覧"));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn thumbnail_panel_decodes_only_visible_rows() {
+        // 200枚あっても保持するのは可視行だけ（スクロール分は再デコードで戻す）。
+        let dir = numbered_dir("rows", 200);
+        let ctx = headless_ctx();
+        let mut app = ViewerApp::new(None);
+        open(&mut app, &ctx, dir.join("img-0000.png"));
+        assert_eq!(app.files.len(), 200);
+
+        app.show_thumbnails = true;
+        let out = update_frame(
+            &mut app,
+            &ctx,
+            raw_input(egui::vec2(800.0, 400.0), Some(egui::pos2(400.0, 300.0))),
+        );
+        assert!(shows(&out, "画像一覧"));
+        let retained = app.thumb_retained.len();
+        assert!(retained > 0, "at least one row must be visible");
+        assert!(retained < app.files.len(), "retained={retained}");
+        assert!(
+            retained <= 12,
+            "visible window should stay small: {retained}"
+        );
+        assert_eq!(app.thumb_lru.len(), retained);
+        // 可視分は先頭からの連続したプレフィックス。
+        let expected: std::collections::HashSet<PathBuf> =
+            app.files.iter().take(retained).cloned().collect();
+        assert_eq!(app.thumb_retained, expected);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn thumbnail_panel_width_matches_wheel_dead_zone() {
+        // 入力層のホイール移動デッドゾーンは、実際に描かれたパネル幅と一致する。
+        let dir = numbered_dir("deadzone", 4);
+        let ctx = headless_ctx();
+        let mut app = ViewerApp::new(None);
+        open(&mut app, &ctx, dir.join("img-0000.png"));
+        let size = egui::vec2(800.0, 600.0);
+
+        // パネルを閉じた状態の中央領域の左端を基準にする。
+        let _ = update_frame(&mut app, &ctx, raw_input(size, None));
+        let closed_left = app.view_rect.left();
+
+        app.show_thumbnails = true;
+        let _ = update_frame(
+            &mut app,
+            &ctx,
+            raw_input(size, Some(egui::pos2(400.0, 300.0))),
+        );
+        let open_left = app.view_rect.left();
+        // 中央領域はパネルを開いた分だけ共有定数（=入力層のデッドゾーン幅）右へずれる。
+        assert!(
+            (open_left - closed_left - THUMBNAIL_PANEL_WIDTH).abs() < 1.0,
+            "closed={closed_left} open={open_left}"
+        );
+
+        // パネル内ではホイール移動しない。
+        send_wheel(&ctx, &mut app, THUMBNAIL_PANEL_WIDTH - 1.0, -40.0);
+        assert_eq!(app.index(), 0);
+        // パネルの外では1ノッチで1枚進む。
+        send_wheel(&ctx, &mut app, THUMBNAIL_PANEL_WIDTH + 1.0, -40.0);
+        assert_eq!(app.index(), 1);
+
+        // 閉じれば中央領域は元の位置に戻る。
+        app.show_thumbnails = false;
+        let _ = update_frame(&mut app, &ctx, raw_input(size, None));
+        assert!(
+            (app.view_rect.left() - closed_left).abs() < 1.0,
+            "closed={closed_left} left={}",
+            app.view_rect.left()
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    fn send_wheel(ctx: &egui::Context, app: &mut ViewerApp, x: f32, dy: f32) {
+        let mut raw = raw_input(egui::vec2(800.0, 600.0), Some(egui::pos2(x, 300.0)));
+        raw.events.push(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, dy),
+            modifiers: egui::Modifiers::default(),
+        });
+        let _ = ctx.run(raw, |ctx| app.handle_wheel_nav(ctx));
     }
 }
