@@ -80,6 +80,12 @@ Artifacts are uploaded even when the run fails (`if: always()`), as the
 `gui-smoke-<run id>` artifact (paths relative to `target/`):
 
 - `gui-shots/…` — the `smoke-*.png` window captures.
+- `gui-shots/gui-smoke-app.out.txt`, `gui-shots/gui-smoke-app.err.txt` — the
+  viewer's own stdout/stderr, captured by the script. The app is a
+  console-subsystem binary in debug builds and `main` returns `eframe::Result`,
+  so a startup failure (for example no usable GPU/GL context) prints
+  `Error: …` there and exits 1; the script also repeats the first line in the
+  `FAIL:` summary so the reason is visible without downloading anything.
 - `gui-smoke.log` — the full script output, including the isolated-settings
   before/after diff (the throwaway settings directory is deleted by the script,
   so the log is the record) and, on failure, the `FAIL:` summary naming each
