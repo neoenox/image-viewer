@@ -50,6 +50,30 @@ jobs:
       - name: Build debug exe for the smoke run
         run: cargo build --locked
 
+      # GitHub-hosted Windows runners only expose OpenGL 1.1 (Microsoft Basic
+      # Display Adapter) while egui's glow backend needs 2.0+: the viewer exits
+      # with `Error: OpenGL(PainterError("egui_glow requires opengl 2.0+. "))`
+      # before any window exists. Mesa's llvmpipe is a CPU implementation of
+      # OpenGL, and Windows resolves opengl32.dll from the application directory
+      # before System32, so it is dropped next to the exe. The archive is fetched
+      # from a third party, so its digest is pinned and verified.
+      - name: Install Mesa llvmpipe (software OpenGL for the viewer)
+        shell: pwsh
+        run: |
+          $version = '26.2.5'
+          $asset = "mesa-llvmpipe-x64-$version.7z"
+          $expected = 'D1B713CA2A7FBA47A50C058099F13C435DDB76A16A422C334E4D787F9755A31D'
+          Invoke-WebRequest -Uri "https://github.com/mmozeiko/build-mesa/releases/download/$version/$asset" -OutFile $asset
+          $actual = (Get-FileHash -LiteralPath $asset -Algorithm SHA256).Hash
+          if ($actual -ne $expected) {
+            throw "Mesa archive digest mismatch: expected $expected, got $actual"
+          }
+          $sevenZip = (Get-Command 7z -ErrorAction SilentlyContinue).Source
+          if (-not $sevenZip) { $sevenZip = Join-Path $env:ProgramFiles '7-Zip\7z.exe' }
+          & $sevenZip x -y $asset -omesa-llvmpipe | Out-Null
+          Copy-Item -LiteralPath 'mesa-llvmpipe/opengl32.dll' -Destination 'target/debug/opengl32.dll' -Force
+          Write-Output "installed Mesa llvmpipe $version opengl32.dll next to the exe"
+
       # The script opens <ImgDir>/4k.png and then navigates into 8k.png and
       # corrupt.gif, so the #48 acceptance images must exist first.
       - name: Generate acceptance images

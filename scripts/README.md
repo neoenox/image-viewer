@@ -99,8 +99,16 @@ Requirements: an interactive Windows desktop. The script brings a window to the
 foreground and captures it with `PrintWindow`, so it cannot run on a headless
 runner. `windows-latest` normally provides a desktop session; the workflow
 probes for it first (`Environment probe`) so that if a run does fail that way,
-the log says so instead of looking like a viewer defect. This has not yet been
-observed on a hosted runner.
+the log says so instead of looking like a viewer defect.
+
+Requirements: OpenGL 2.0 or newer. egui's glow backend needs it, and a
+GitHub-hosted Windows runner only offers OpenGL 1.1 (Microsoft Basic Display
+Adapter), where the viewer exits immediately with
+`Error: OpenGL(PainterError("egui_glow requires opengl 2.0+. "))`. The workflow
+therefore installs Mesa llvmpipe (a CPU implementation of OpenGL, digest pinned)
+and drops its `opengl32.dll` next to the exe. On a developer machine with a real
+GPU nothing extra is needed; if a run dies in `identify` with that error, the
+runner had no usable GL and Mesa was not installed.
 
 Known environment caveat: on some desktops the app's window stops being
 enumerable roughly 40-50s into a run while the process stays alive. The script
