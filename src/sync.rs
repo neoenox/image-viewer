@@ -20,7 +20,12 @@ pub(crate) fn wait_recover<'a, T>(wake: &Condvar, guard: MutexGuard<'a, T>) -> M
 
 /// Runs decoding work so that a panic inside a codec becomes an `Err` instead of
 /// killing the worker thread (which would leave its job marked in flight forever).
-pub(crate) fn catch_panic<T>(f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+/// Run `f`, turning a panic into an error value.
+///
+/// Generic over the error so a caller can keep a richer error type (the detail
+/// loader distinguishes a file that can never be decoded from one that merely
+/// failed); `E` must be constructible from the panic message.
+pub(crate) fn catch_panic<T, E: From<String>>(f: impl FnOnce() -> Result<T, E>) -> Result<T, E> {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(f))
-        .unwrap_or_else(|_| Err("decoder panicked".to_owned()))
+        .unwrap_or_else(|_| Err(E::from("decoder panicked".to_owned())))
 }

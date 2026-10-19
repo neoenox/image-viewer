@@ -99,12 +99,25 @@ Decoding rejects images whose estimated expansion exceeds the 256 MiB per-job
 limit. This is not a process-wide memory ceiling: decoder working memory, display
 textures, GIF decoding, and thumbnail decoding also use memory. Region decoding
 expands the whole source image because the generic decoder does not support reading
-only a rectangle; the expanded source is subject to the same 256 MiB per-job decode
-limit as any other load, and the cropped region is bounded by the 80 MiB preview
-cache budget. The expanded source is kept while you pan across the same image and
-rotation, and dropped when you move to another file, rotate, or the file changes on
-disk. An in-flight decode finishes before cancellation
-is observed; pending current-image work takes precedence over preloads.
+only a rectangle (the `image` crate's JPEG decoder implements `read_image`, not a
+rectangle read, and its `zune-jpeg` backend exposes no row-skip or scaled-decode
+entry point). The expanded source has its own 128 MiB budget, tighter than the
+per-job decode ceiling, and the cropped region is bounded by the 80 MiB preview
+cache budget. Measured on a 3000x2000 image (release, one machine): the first
+original-resolution region costs **77 ms**, and every later region of the same
+image **1 ms**, because the expanded source is kept while you pan across the same
+image and rotation and dropped when you move to another file, rotate, or the file
+changes on disk.
+
+For 8-bit sources both limits fall on the same pixel count (33.5 megapixels), so
+the tighter budget only ever decides the outcome for wider samples - a 16-bit
+source whose decode buffer is larger than its RGBA estimate. When the source
+cannot be expanded at all, the viewer keeps the enlarged preview, says why in the
+status line, and stops asking for original pixels for that file until another
+image is opened: every region of such a file fails the same way, so retrying on
+each 128-pixel pan step would only repeat the check and the message. An in-flight
+decode finishes before cancellation is observed; pending current-image work takes
+precedence over preloads.
 
 ## Latency benchmark
 

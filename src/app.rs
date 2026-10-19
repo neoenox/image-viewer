@@ -126,6 +126,13 @@ pub struct ViewerApp {
     pub(crate) generation: u64,
     pub(crate) loading: bool,
     pub(crate) detail_pending: bool,
+    /// Set when the current file's original-resolution source cannot be decoded
+    /// at all (it is over the detail budget). Every region of such a file would
+    /// fail the same way, so the viewer stops asking instead of repeating a
+    /// header read and a status line on every 128px pan step. Cleared when a
+    /// different file is selected; rotation cannot help, since it does not
+    /// change how many pixels the source has.
+    pub(crate) detail_unavailable: bool,
     pub(crate) view_rect: egui::Rect,
     pub(crate) detail_key: Option<crate::loader::DetailKey>,
     pub settings: crate::settings::ViewerSettings,
@@ -204,6 +211,7 @@ impl ViewerApp {
             generation: 0,
             loading: false,
             detail_pending: false,
+            detail_unavailable: false,
             view_rect: egui::Rect::NOTHING,
             detail_key: None,
             settings: crate::settings::ViewerSettings::default(),
@@ -301,6 +309,7 @@ impl ViewerApp {
         self.clear_upscale();
         self.detail_key = None;
         self.detail_pending = false;
+        self.detail_unavailable = false;
         self.status_msg.clear();
         self.load_error = None;
         self.texture = None;
@@ -411,7 +420,20 @@ impl ViewerApp {
                 }
                 Err((key, error)) if self.detail_key.as_ref() == Some(&key) => {
                     self.detail_pending = false;
-                    self.status_msg = format!("原寸表示エラー: {error}")
+                    match error {
+                        // Nothing about this file can be shown at original
+                        // resolution, so stop asking and say why: the enlarged
+                        // preview stays on screen either way.
+                        crate::loader::DetailError::TooLarge => {
+                            self.detail_unavailable = true;
+                            self.status_msg = "原寸表示は使えません（画像が大きすぎます）。\
+                                                プレビューを拡大して表示します"
+                                .to_owned();
+                        }
+                        crate::loader::DetailError::Failed(reason) => {
+                            self.status_msg = format!("原寸表示エラー: {reason}")
+                        }
+                    }
                 }
                 _ => {}
             }
@@ -874,7 +896,7 @@ impl ViewerApp {
     }
 
     pub(crate) fn request_detail(&mut self, region: [u32; 4]) {
-        if self.is_animated() {
+        if self.is_animated() || self.detail_unavailable {
             return;
         }
         let key = crate::loader::DetailKey {
@@ -1378,6 +1400,99 @@ mod tests {
             assert!(start.elapsed() < Duration::from_secs(15));
             std::thread::sleep(Duration::from_millis(5));
         }
+    }
+    /// Wait for the detail request to finish however it ends (success or error).
+    fn settle_detail_request(app: &mut ViewerApp, ctx: &egui::Context) {
+        let start = Instant::now();
+        while app.detail_pending {
+            app.poll_loading(ctx);
+            assert!(
+                start.elapsed() < Duration::from_secs(15),
+                "detail request timed out"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn an_image_too_large_for_original_pixels_says_so_once_and_stops_asking() {
+        let dir = std::env::temp_dir().join(format!("iv-detail-huge-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("huge.png");
+        crate::imaging::bomb_png(&path, 6000, 6000);
+        let ctx = egui::Context::default();
+        let mut app = ViewerApp::new(None);
+        // The 6000x6000 preview is rejected as well, which is not what this test
+        // is about: it stops at the detail request either way.
+        app.open_path(path.clone(), Some(&ctx));
+        settle(&mut app, &ctx);
+
+        app.request_detail([0, 0, 128, 128]);
+        settle_detail_request(&mut app, &ctx);
+
+        assert!(
+            app.detail_unavailable,
+            "the file is condemned, not the request"
+        );
+        assert!(
+            app.status_msg.contains("大きすぎ"),
+            "the reason must be in the user's words: {}",
+            app.status_msg
+        );
+        assert!(
+            !app.status_msg.contains("原寸表示エラー"),
+            "a file that can never work is not an error to retry: {}",
+            app.status_msg
+        );
+        assert!(
+            app.status_msg.contains("プレビュー"),
+            "it must say what is on screen instead: {}",
+            app.status_msg
+        );
+
+        // Panning on must not enqueue another doomed decode for the same file.
+        let asked = app.detail_key.clone();
+        app.request_detail([256, 0, 128, 128]);
+        assert!(!app.detail_pending, "no second request for this file");
+        assert_eq!(app.detail_key, asked, "the queue was left alone");
+
+        // Selecting the file again starts from scratch.
+        app.open_path(path, Some(&ctx));
+        assert!(!app.detail_unavailable);
+        assert!(app.status_msg.is_empty(), "the old reason is cleared");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_failed_region_request_is_retried_when_the_view_moves() {
+        let dir = std::env::temp_dir().join(format!("iv-detail-retry-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("small.png");
+        image::RgbaImage::new(1400, 1200).save(&path).unwrap();
+        let ctx = egui::Context::default();
+        let mut app = ViewerApp::new(None);
+        app.open_path(path, Some(&ctx));
+        settle(&mut app, &ctx);
+
+        // A region past the image edge: this request is wrong, not the file.
+        app.request_detail([4000, 4000, 128, 128]);
+        settle_detail_request(&mut app, &ctx);
+        assert!(
+            !app.detail_unavailable,
+            "one bad region must not condemn the file"
+        );
+        assert!(
+            app.status_msg.contains("原寸表示エラー"),
+            "status={}",
+            app.status_msg
+        );
+
+        // Moving the view asks again, and this time it works.
+        app.request_detail([0, 0, 128, 128]);
+        assert!(app.detail_pending, "the next region is still requested");
+        settle_detail(&mut app, &ctx);
+        assert_eq!(app.detail_tiles.len(), 1);
+        std::fs::remove_dir_all(&dir).ok();
     }
     #[test]
     fn visible_detail_has_original_pixels_after_rotation() {
