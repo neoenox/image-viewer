@@ -23,6 +23,24 @@ data directory, preserving the user's real file associations:
 powershell -NoProfile -File tests/association-scripts.ps1
 ```
 
+Line coverage is measured with `cargo-llvm-cov` on Windows (the primary platform:
+`assoc.rs`, `win_icon.rs` and the Windows half of `window_state.rs` only compile
+there):
+
+```powershell
+rustup component add llvm-tools-preview        # once
+cargo install --locked cargo-llvm-cov          # once
+cargo llvm-cov --locked --all-targets --summary-only --fail-under-lines 85
+```
+
+The CI `coverage` job runs exactly that and uploads the `lcov` report as the
+`coverage` artifact. The 85% floor is a floor, not a target: the measured total is
+**87.3%** of 6123 lines, so the two points of slack absorb runner variation while
+any change adding a few hundred uncovered lines still fails. Raise the floor as
+coverage improves; do not lower it to make a red run green. Ignored benchmark
+tests do not run by default and are therefore not counted, and code behind
+`#[cfg(not(windows))]` is not compiled on the measuring platform.
+
 ## Releasing
 
 Pushing a `v*` tag runs `.github/workflows/release.yml`, which tests, builds, and

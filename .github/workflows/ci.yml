@@ -93,3 +93,42 @@ jobs:
       - name: Build environment preflight
         run: pwsh -NoProfile -File scripts/preflight.ps1
         shell: pwsh
+
+  # Line coverage is measured on Windows, the primary platform: `assoc.rs`,
+  # `win_icon.rs` and the Windows half of `window_state.rs` only compile there,
+  # so a Linux run would not see them. The reverse is the honest cost: code
+  # behind `#[cfg(not(windows))]` is not compiled here and is not measured (the
+  # non-Windows association mirror is still covered, via
+  # tests/assoc-mirror-parity.rs, which includes it on every platform).
+  # A separate job so a coverage regression is named clearly instead of hiding
+  # in the test job's output.
+  coverage:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+      # Floor, not a target: the measured total is 87.3% of lines (6123 lines,
+      # 778 uncovered) on Windows, so 85 leaves about two points of slack for
+      # runner variation while still failing any change that adds a few hundred
+      # uncovered lines. Raise it as coverage improves; do not lower it to make
+      # a red run green. `--summary-only` prints the per-file table into the log.
+      - name: Measure line coverage and enforce the floor
+        run: cargo llvm-cov --locked --all-targets --summary-only --fail-under-lines 85
+      - name: Write the report for the artifact
+        if: always()
+        run: |
+          # `report --output-path` does not create parent directories (verified:
+          # it fails with "path not found"), so make them first.
+          New-Item -ItemType Directory -Force -Path target/coverage | Out-Null
+          cargo llvm-cov report --locked --lcov --output-path target/coverage/lcov.info
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: coverage
+          path: target/coverage/lcov.info
