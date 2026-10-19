@@ -53,6 +53,8 @@ in the exe's file properties.
 - T opens the thumbnail list. Click a thumbnail or filename to select it.
 - Arrow keys (or A / D): previous/next; Home / End: first/last; + / - (or E / Q): zoom; 0: fit;
   R / Shift+R: rotate; F / F11: fullscreen; Space: slideshow; Ctrl+O: open; Esc: leave fullscreen or stop the slideshow.
+- F12 shows the display-latency overlay (see [Latency benchmark](#latency-benchmark)); it can also be
+  enabled at startup with `image-viewer.exe --stats`.
 - Photos open upright: the EXIF orientation that cameras and phones record (JPEG, PNG,
   WebP, TIFF) is applied when decoding, so thumbnails, zoom and R / Shift+R start from
   the upright image.
@@ -97,6 +99,16 @@ workers only, not rendering or texture upload:
 cargo test --release loader::bench -- --ignored --nocapture --test-threads=1
 ```
 
+What the window actually costs is measured in the app instead: F12 (or
+`--stats`) opens an overlay with the frame time (median and p95 of the last 120
+frames), the time from selecting an image to its texture being displayed
+(median and latest), and the texture upload time. It measures the whole path
+including rendering, which the benchmark above deliberately excludes, so the two
+are not comparable numbers. Measurement only runs while the overlay is open:
+with it closed the viewer takes no timestamps at all. A load that fails does not
+record a sample, so a broken file cannot look like a slow one. The overlay is
+unstyled on purpose - it is a measuring instrument, not a feature of the UI.
+
 ## Local verification scripts
 
 Windows helper scripts for preflight checks, generating the acceptance images,
@@ -115,6 +127,7 @@ blocker.
 - `upscale.rs`: high-quality (Lanczos) magnification of the visible region.
 - `app.rs`: viewer state and completed-result application.
 - `input.rs`, `settings.rs`, `view.rs`: controls, settings, and rendering.
+- `stats.rs`: display-latency measurement behind the F12 overlay (bounded sample window).
 - `sync.rs`: lock helpers that survive a poisoned mutex; panic-safe worker decoding.
 - `win_icon.rs`: window/taskbar icon applied via Win32 (keeps eframe's icon code out of the exe).
 - `assoc.rs`: Windows file association registration and restoration.

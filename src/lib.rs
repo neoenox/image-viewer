@@ -10,6 +10,7 @@ mod imaging;
 mod input;
 mod loader;
 pub mod settings;
+mod stats;
 mod sync;
 mod upscale;
 mod view;
