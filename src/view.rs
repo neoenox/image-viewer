@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 pub(crate) const THUMBNAIL_PANEL_WIDTH: f32 = 156.0;
 
 /// Pointer distance from the top edge that reveals the auto-hidden toolbar.
-pub(crate) const TOOLBAR_REVEAL_ZONE: f32 = 48.0;
+const TOOLBAR_REVEAL_ZONE: f32 = 48.0;
 
 /// ポインタが上端の表示ゾーン内にあるか（自動非表示ツールバーの再表示条件）。
 /// 横位置は関係なく、上端からの距離だけで決まる。
@@ -468,7 +468,7 @@ impl ViewerApp {
 
     /// ツールバーを表示するか。自動非表示が有効でも、固定中・ポインタが上端付近・
     /// ファイル未読込・設定／関連付けダイアログの表示中は表示する。
-    pub(crate) fn toolbar_visible(&self, pointer_near_top: bool) -> bool {
+    fn toolbar_visible(&self, pointer_near_top: bool) -> bool {
         !self.settings.auto_hide_toolbar
             || self.toolbar_pinned
             || pointer_near_top
@@ -941,7 +941,8 @@ mod tests {
         let mut app = ViewerApp::new(None);
         assert!(app.files.is_empty());
         let out = update_frame(&mut app, &ctx, raw_input(egui::vec2(800.0, 600.0), None));
-        assert!(app.view_rect.top() > 20.0, "top={}", app.view_rect.top());
+        // 画像が無いフレームでは中央パネルが早期 return して `view_rect` を更新しない
+        // ため、ここで領域を主張しても意味がない（常に真になる）。描かれたラベルだけを見る。
         assert!(shows(&out, "設定"));
     }
 
@@ -1216,6 +1217,36 @@ mod tests {
             app.files.iter().take(retained).cloned().collect();
         assert_eq!(app.thumb_retained, expected);
 
+        // 記録だけでなく実デコードを見る：可視行はキャッシュに載り、画面外は
+        // `prune` で落ちる（prune を消すとここが落ちる）。デコードはワーカーで
+        // 非同期なので、可視分が載るまで有界にフレームを回す。
+        let visible_paths: Vec<PathBuf> = app.thumb_retained.iter().cloned().collect();
+        let start = Instant::now();
+        while !visible_paths
+            .iter()
+            .any(|path| app.thumbnail_loader.is_cached(path, 128))
+        {
+            assert!(
+                start.elapsed() < Duration::from_secs(15),
+                "thumbnail decode timed out"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+            update_frame(
+                &mut app,
+                &ctx,
+                raw_input(egui::vec2(800.0, 400.0), Some(egui::pos2(400.0, 300.0))),
+            );
+        }
+        let off_screen = app.files.last().cloned().unwrap();
+        assert!(
+            !app.thumbnail_loader.is_cached(&off_screen, 128),
+            "an off-screen thumbnail stayed decoded"
+        );
+        assert!(
+            app.thumbnail_loader.retained_bytes() > 0,
+            "visible thumbnails should hold decoded bytes"
+        );
+
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -1251,6 +1282,9 @@ mod tests {
         // パネルの外では1ノッチで1枚進む。
         send_wheel(&ctx, &mut app, THUMBNAIL_PANEL_WIDTH + 1.0, -40.0);
         assert_eq!(app.index(), 1);
+        // 移動先の読み込みを待つ：読み込み中は中央パネルが早期 return して
+        // `view_rect` を更新しないため、待たずに測るとパネルを閉じた幅を見誤る。
+        settle(&mut app, &ctx);
 
         // 閉じれば中央領域は元の位置に戻る。
         app.show_thumbnails = false;
