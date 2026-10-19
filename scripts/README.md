@@ -7,7 +7,7 @@ these ship in the exe; they are developer and CI helpers.
 | --- | --- |
 | `preflight.ps1` | Fail fast if the machine cannot build (missing Rust toolchain, MSVC linker or Windows SDK). Exit 0 = ready to build. |
 | `new-acceptance-images.ps1` | Generate the #48 memory-bounds test images into `target\acceptance` (`8k.png`, `over8k.png`, `4k.png`, `corrupt.gif`). |
-| `gui-smoke.ps1` | Drive the real window with automated input and verify state transitions. See below. |
+| `gui-smoke.ps1` | Drive the real window with automated input and verify state transitions. Runs nightly in `.github/workflows/gui-smoke.yml`; see below. |
 | `associate.ps1` | Register the viewer for image types under `HKCU` (no admin). |
 | `unassociate.ps1` | Undo `associate.ps1`. |
 | `open-default-apps.ps1` | Open Settings > Default apps to finish association in the UI. Run `associate.ps1` first. |
@@ -53,9 +53,48 @@ Options:
 The exit code is non-zero if any assertion fails, so CI can gate on it. On
 success it prints `PASS: gui-smoke (N transitions verified)`.
 
+### Scheduled runs
+
+`.github/workflows/gui-smoke.yml` runs this script on a schedule (nightly,
+18:17 UTC = 03:17 JST) and on demand. It is deliberately **not** a
+`pull_request` check: the run drives a real window with injected input, which is
+more timing- and desktop-dependent than the unit and bench gates in `ci.yml`, so
+a red run there is a triage signal, not a merge blocker. The job is named
+`GUI smoke - scheduled check, not a PR gate` to make that hard to misread.
+
+```powershell
+# run the same job by hand
+gh workflow run gui-smoke.yml --ref main
+
+# stress run that also steals the foreground (-ContendFocus)
+gh workflow run gui-smoke.yml --ref main -f contend_focus=true
+
+gh run list --workflow gui-smoke.yml --limit 5
+gh run watch   # follow the newest run
+```
+
+The workflow builds `target/debug/image-viewer.exe`, generates the acceptance
+images into `target/acceptance`, then runs the script with
+`-Exe target/debug/image-viewer.exe -ImgDir target/acceptance -ShotDir target/gui-shots`.
+Artifacts are uploaded even when the run fails (`if: always()`), as the
+`gui-smoke-<run id>` artifact (paths relative to `target/`):
+
+- `gui-shots/…` — the `smoke-*.png` window captures.
+- `gui-smoke.log` — the full script output, including the isolated-settings
+  before/after diff (the throwaway settings directory is deleted by the script,
+  so the log is the record) and, on failure, the `FAIL:` summary naming each
+  failed stage and its retry reason.
+- `acceptance/*.png`, `acceptance/*.gif` — the generated inputs, so a failure can
+  be reproduced locally with the same images.
+
+The run summary also repeats the `PASS:`/`FAIL:` lines and the exit code.
+
 Requirements: an interactive Windows desktop. The script brings a window to the
-foreground and captures it with `PrintWindow`, so it cannot run on a headless CI
-runner.
+foreground and captures it with `PrintWindow`, so it cannot run on a headless
+runner. `windows-latest` normally provides a desktop session; the workflow
+probes for it first (`Environment probe`) so that if a run does fail that way,
+the log says so instead of looking like a viewer defect. This has not yet been
+observed on a hosted runner.
 
 Known environment caveat: on some desktops the app's window stops being
 enumerable roughly 40-50s into a run while the process stays alive. The script
