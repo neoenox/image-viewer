@@ -100,6 +100,11 @@ impl ViewerApp {
             self.fullscreen = !self.fullscreen;
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.fullscreen));
         }
+        // F12: 表示レイテンシの計測。ワーカーの所要時間だけでなく、描画と
+        // テクスチャのアップロードを含む実表示を測る（README 参照）。
+        if ctx.input(|i| i.key_pressed(egui::Key::F12)) {
+            self.show_stats = !self.show_stats;
+        }
         if ctx.input(|i| i.key_pressed(egui::Key::Space)) {
             self.slideshow = self.files.len() >= 2 && !self.slideshow;
             self.last_advance = self.slideshow.then(Instant::now);
