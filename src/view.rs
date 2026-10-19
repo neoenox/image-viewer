@@ -19,6 +19,10 @@ fn pointer_reveals_toolbar(hover: Option<egui::Pos2>) -> bool {
 
 impl eframe::App for ViewerApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        // 計測は監視中（F12）だけ。無効時は時刻取得すらしない。
+        if self.show_stats {
+            self.stats.begin_frame(Instant::now());
+        }
         crate::win_icon::apply(frame);
         // 現在のウィンドウ状態（サイズ・位置・最大化）を追跡し、次回起動時に
         // 復元できるようにする。終了時フラッシュもここで行う。
@@ -438,6 +442,11 @@ impl eframe::App for ViewerApp {
                 });
             self.show_assoc = open;
         }
+
+        self.stats_window(ctx);
+        if self.show_stats {
+            self.stats.end_frame(Instant::now());
+        }
     }
 }
 
@@ -475,6 +484,64 @@ impl ViewerApp {
             || self.files.is_empty()
             || self.show_settings
             || self.show_assoc
+    }
+
+    /// 表示レイテンシのオーバーレイ（F12）。
+    ///
+    /// `loader::bench` はワーカーが画像を作るまでしか測らないため、描画と
+    /// テクスチャのアップロードを含む「実際に待つ時間」をここで出す。
+    fn stats_window(&mut self, ctx: &egui::Context) {
+        if !self.show_stats {
+            return;
+        }
+        let mut open = true;
+        egui::Window::new("表示レイテンシ (F12)")
+            .open(&mut open)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.label(format!("フレーム数: {}", self.stats.frames()));
+                match (self.stats.frame_median_ms(), self.stats.frame_p95_ms()) {
+                    (Some(median), Some(p95)) => {
+                        ui.label(format!("フレーム: 中央値 {median:.1} ms / p95 {p95:.1} ms"));
+                    }
+                    _ => {
+                        ui.label("フレーム: 計測中");
+                    }
+                }
+                match (self.stats.display_last_ms(), self.stats.display_median_ms()) {
+                    (Some(last), Some(median)) => {
+                        ui.label(format!(
+                            "選択→表示: 最新 {last:.0} ms / 中央値 {median:.0} ms ({}件)",
+                            self.stats.display_sample_count()
+                        ));
+                    }
+                    _ => {
+                        ui.label("選択→表示: 計測中");
+                    }
+                }
+                match (self.stats.upload_last_ms(), self.stats.upload_p95_ms()) {
+                    (Some(last), Some(p95)) => {
+                        ui.label(format!(
+                            "テクスチャ生成: 最新 {last:.1} ms / p95 {p95:.1} ms"
+                        ));
+                    }
+                    _ => {
+                        ui.label("テクスチャ生成: 計測中");
+                    }
+                }
+                if let Some(name) = self.current_path().map(|p| {
+                    p.file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into_owned()
+                }) {
+                    ui.label(format!("画像: {name}"));
+                }
+                ui.separator();
+                ui.small("描画とテクスチャのアップロードを含む実表示の計測。");
+                ui.small("計測中は毎フレーム時刻を取るため、普段は F12 で切っておく。");
+            });
+        self.show_stats = open;
     }
 
     fn settings_window(&mut self, ctx: &egui::Context) {
@@ -1306,5 +1373,116 @@ mod tests {
             modifiers: egui::Modifiers::default(),
         });
         let _ = ctx.run(raw, |ctx| app.handle_wheel_nav(ctx));
+    }
+
+    // ---------------------------------------------------------------
+    // 表示レイテンシ計測（F12）
+    // ---------------------------------------------------------------
+
+    /// キー押下イベント1つだけを含むフレームを駆動する。
+    fn send_key(ctx: &egui::Context, app: &mut ViewerApp, key: egui::Key) {
+        let mut raw = raw_input(egui::vec2(800.0, 600.0), None);
+        raw.events.push(egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::default(),
+        });
+        let _ = update_frame(app, ctx, raw);
+    }
+
+    #[test]
+    fn stats_overlay_is_absent_and_unmeasured_by_default() {
+        let dir = fixture_dir("stats-off");
+        let ctx = headless_ctx();
+        let mut app = ViewerApp::new(None);
+        open(&mut app, &ctx, dir.join("a.png"));
+        let out = update_frame_settled(&mut app, &ctx, raw_input(egui::vec2(800.0, 600.0), None));
+
+        assert!(!app.show_stats, "F12 を押すまでは無効");
+        assert!(!shows(&out, "表示レイテンシ"), "オーバーレイは描かない");
+        // 無効時は計測そのものを行わない（時刻取得もフレーム計上もしない）。
+        assert_eq!(app.stats.frames(), 0);
+        assert_eq!(app.stats.display_sample_count(), 0);
+        assert_eq!(app.stats.upload_last_ms(), None);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn f12_toggles_the_stats_overlay() {
+        let ctx = headless_ctx();
+        let mut app = ViewerApp::new(None);
+        assert!(!app.show_stats);
+
+        send_key(&ctx, &mut app, egui::Key::F12);
+        assert!(app.show_stats, "1回目で表示");
+
+        send_key(&ctx, &mut app, egui::Key::F12);
+        assert!(!app.show_stats, "2回目で非表示");
+    }
+
+    #[test]
+    fn stats_overlay_measures_selection_to_display_and_upload() {
+        let dir = fixture_dir("stats-on");
+        let ctx = headless_ctx();
+        let mut app = ViewerApp::new(None);
+        app.show_stats = true;
+
+        for name in ["a.png", "b.png"] {
+            open(&mut app, &ctx, dir.join(name));
+            let out =
+                update_frame_settled(&mut app, &ctx, raw_input(egui::vec2(800.0, 600.0), None));
+            assert!(
+                shows(&out, "表示レイテンシ"),
+                "{name} の表示中はオーバーレイが出る"
+            );
+        }
+
+        // 画像を選ぶたびに「選択→表示」が1サンプル増える。
+        assert_eq!(app.stats.display_sample_count(), 2);
+        assert!(app.stats.display_last_ms().is_some());
+        assert!(app.stats.display_median_ms().is_some());
+        // フレーム時間とテクスチャ生成（アップロード）も測れている。
+        assert!(app.stats.frames() >= 2);
+        assert!(app.stats.upload_last_ms().is_some());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn stats_overlay_renders_the_measured_numbers() {
+        let dir = fixture_dir("stats-text");
+        let ctx = headless_ctx();
+        let mut app = ViewerApp::new(None);
+        app.show_stats = true;
+        open(&mut app, &ctx, dir.join("a.png"));
+        let out = update_frame_settled(&mut app, &ctx, raw_input(egui::vec2(800.0, 600.0), None));
+
+        // 「計測中」ではなく実測値がラベル化されている（表示まで通っている）。
+        let text = rendered_text(&out).join("\n");
+        assert!(text.contains("選択→表示: 最新"), "text={text}");
+        assert!(text.contains("テクスチャ生成: 最新"), "text={text}");
+        assert!(text.contains("画像: a.png"), "text={text}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_failed_load_records_no_waiting_sample() {
+        let dir = fixture_dir("stats-fail");
+        let ctx = headless_ctx();
+        let mut app = ViewerApp::new(None);
+        open(&mut app, &ctx, dir.join("a.png"));
+
+        // 監視を始めてから壊れた画像を選ぶ：表示されないので待ち時間は残さない。
+        app.show_stats = true;
+        open(&mut app, &ctx, dir.join("d.png"));
+        assert!(app.load_error.is_some(), "d.png は復号できない");
+        assert_eq!(app.stats.display_sample_count(), 0);
+        assert_eq!(app.stats.display_last_ms(), None);
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

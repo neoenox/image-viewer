@@ -151,6 +151,9 @@ pub struct ViewerApp {
     pub(crate) thumb_retained: std::collections::HashSet<PathBuf>,
     pub(crate) show_assoc: bool,
     pub(crate) assoc_status: Vec<(String, bool)>,
+    /// 表示レイテンシの実測値（F12）。無効な間は計測そのものを行わない。
+    pub(crate) stats: crate::stats::LatencyStats,
+    pub(crate) show_stats: bool,
     /// Last time the tracked window size was written to disk. Writes are
     /// throttled so interactive resizing does not rewrite the file every
     /// frame; the final size is flushed on close (see `track_window_size`).
@@ -223,6 +226,8 @@ impl ViewerApp {
             thumb_retained: std::collections::HashSet::new(),
             show_assoc: false,
             assoc_status: Vec::new(),
+            stats: crate::stats::LatencyStats::default(),
+            show_stats: false,
             last_window_save: Instant::now(),
             window_state_dirty: false,
             startup_fit_done: false,
@@ -269,8 +274,13 @@ impl ViewerApp {
             let (w, h) = (rgba.width() as usize, rgba.height() as usize);
             let pixels = rgba.into_raw();
             let color = egui::ColorImage::from_rgba_unmultiplied([w, h], &pixels);
+            // 監視中だけ測る：無効時は `Instant` すら取らない。
+            let started = self.show_stats.then(Instant::now);
             self.texture =
                 Some(ctx.load_texture(name.clone(), color, egui::TextureOptions::LINEAR));
+            if let Some(started) = started {
+                self.stats.note_upload(started.elapsed());
+            }
         } else {
             self.texture = None;
         }
@@ -317,6 +327,10 @@ impl ViewerApp {
             return;
         };
         self.loading = true;
+        // 「選択 → 表示」の起点。監視中だけ記録する。
+        if self.show_stats {
+            self.stats.note_selection(Instant::now());
+        }
         self.loader.select(self.generation, path, self.tex_cap);
         self.request_preloads();
         if let Some(ctx) = ctx {
@@ -341,8 +355,14 @@ impl ViewerApp {
                             self.anim_due = Some(Instant::now());
                         }
                         self.rebuild_texture(ctx);
+                        if self.show_stats {
+                            self.stats.note_displayed(Instant::now());
+                        }
                     }
-                    Err(error) => self.load_error = Some(format!("開けませんでした: {error}")),
+                    Err(error) => {
+                        self.load_error = Some(format!("開けませんでした: {error}"));
+                        self.stats.clear_pending();
+                    }
                 }
             }
         }
@@ -993,6 +1013,12 @@ fn is_valid_launch_path(path: &Path) -> bool {
     path.exists() && (path.is_dir() || is_supported(path))
 }
 
+/// `--stats`（起動時から表示レイテンシのオーバーレイを出す）が指定されているか。
+/// 画像パスと混ざっても壊れないよう、引数をそのまま走査する。
+fn stats_requested<I: IntoIterator<Item = std::ffi::OsString>>(args: I) -> bool {
+    args.into_iter().any(|arg| arg == "--stats")
+}
+
 pub fn run() -> eframe::Result<()> {
     let initial: Option<PathBuf> = std::env::args_os()
         .nth(1)
@@ -1000,6 +1026,8 @@ pub fn run() -> eframe::Result<()> {
         .filter(|p| is_valid_launch_path(p));
 
     let mut app = ViewerApp::new(initial);
+    // F12 と同じオーバーレイを起動時から出す（ショートカット起動用）。
+    app.show_stats = stats_requested(std::env::args_os().skip(1));
     app.settings_path = crate::settings::ViewerSettings::default_path();
     if let Some(path) = &app.settings_path {
         app.settings = crate::settings::ViewerSettings::load(path);
@@ -1024,6 +1052,26 @@ pub fn run() -> eframe::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use super::stats_requested;
+
+    fn os_args(list: &[&str]) -> Vec<std::ffi::OsString> {
+        list.iter().copied().map(std::ffi::OsString::from).collect()
+    }
+
+    #[test]
+    fn stats_flag_is_recognised_among_other_arguments() {
+        assert!(!stats_requested(os_args(&[])), "no flag means no stats");
+        assert!(
+            !stats_requested(os_args(&["photo.png"])),
+            "an image path is not the flag"
+        );
+        assert!(stats_requested(os_args(&["--stats"])));
+        assert!(
+            stats_requested(os_args(&["photo.png", "--stats"])),
+            "the flag may follow a path"
+        );
+    }
+
     #[test]
     fn toolbar_icons_stay_within_shift_jis() {
         // ASCII is a strict subset of Shift-JIS; reject escaped Unicode too.
