@@ -102,6 +102,44 @@ function Get-FileHashOrNull([string]$path) {
     return $null
 }
 
+# The app is a console-subsystem binary in debug builds and `main` returns
+# `eframe::Result`, so a startup failure prints `Error: ...` to stderr and exits
+# 1. Without redirection that text lands in the child's own console window and is
+# lost, leaving only "process exited early (code 1)". Capture both streams so the
+# reason is always reportable.
+function Get-AppOutput([string]$Path, [int]$Tail = 20) {
+    if (-not $Path) { return @() }
+    if (-not (Test-Path -LiteralPath $Path)) { return @() }
+    return @(Get-Content -LiteralPath $Path -Tail $Tail -ErrorAction SilentlyContinue)
+}
+
+function Get-AppErrorLine {
+    foreach ($path in @($script:AppOut, $script:AppErr)) {
+        foreach ($line in (Get-AppOutput $path)) {
+            if ($line -and $line.Trim()) { return $line.Trim() }
+        }
+    }
+    return $null
+}
+
+function Write-AppDiagnostics {
+    foreach ($path in @($script:AppOut, $script:AppErr)) {
+        $lines = Get-AppOutput $path
+        if ($lines.Count -gt 0) {
+            Write-Output "app output ($([System.IO.Path]::GetFileName($path))):"
+            $lines | ForEach-Object { Write-Output "  $_" }
+        }
+    }
+}
+
+# Builds " - <first app output line>" so a failure summary names the real reason
+# (e.g. a GL/context creation error) instead of only the exit code.
+function Get-AppReasonSuffix {
+    $line = Get-AppErrorLine
+    if (-not $line) { return '' }
+    return " - $line"
+}
+
 function ShootHwnd($Hwnd, [string]$Name) {
     $rect = New-Object Win32Fg+RECT
     [Win32Fg]::GetWindowRect($Hwnd, [ref]$rect) | Out-Null
@@ -180,7 +218,10 @@ $proc = $null
 $contender = $null
 try {
     $env:APPDATA = $iso
-    $proc = Start-Process -FilePath $Exe -ArgumentList "`"$ImgDir/4k.png`"" -PassThru
+    $script:AppOut = Join-Path $ShotDir 'gui-smoke-app.out.txt'
+    $script:AppErr = Join-Path $ShotDir 'gui-smoke-app.err.txt'
+    $proc = Start-Process -FilePath $Exe -ArgumentList "`"$ImgDir/4k.png`"" -PassThru `
+        -RedirectStandardOutput $script:AppOut -RedirectStandardError $script:AppErr
 } finally {
     $env:APPDATA = $realAppData
 }
@@ -216,7 +257,11 @@ try {
         Start-Sleep -Seconds 1
         $waited++
         $proc.Refresh()
-        if ($proc.HasExited) { Fail "identify: process exited early (code $($proc.ExitCode))"; break }
+        if ($proc.HasExited) {
+            Fail "identify: process exited early (code $($proc.ExitCode))$(Get-AppReasonSuffix)"
+            Write-AppDiagnostics
+            break
+        }
         $candidate = $proc.MainWindowHandle
         if ($candidate -eq [IntPtr]::Zero) { continue }
         $rect = New-Object Win32Fg+RECT
@@ -226,10 +271,14 @@ try {
             break
         }
     }
-    if ($hwnd -eq [IntPtr]::Zero -and -not $proc.HasExited) {
+    if ($hwnd -ne [IntPtr]::Zero) {
+        Ok "identify: window after ${waited}s"
+    } elseif (-not $proc.HasExited) {
         Fail "identify: no sized, titled main window within ${StartupTimeoutSec}s"
     } else {
-        Ok "identify: window after ${waited}s"
+        # 早期終了はループ内で Fail 済み。ここで "window after Ns" を出すと
+        # 直前の FAIL と矛盾して見えるため、明示的にスキップを記録する。
+        Write-Output 'note: identify: skipped (process already exited)'
     }
 
     if ($hwnd -ne [IntPtr]::Zero) {
@@ -314,7 +363,8 @@ try {
         # --- 5. still alive after the whole run ----------------------------
         $proc.Refresh()
         if ($proc.HasExited) {
-            Fail "liveness: app exited (code $($proc.ExitCode))"
+            Fail "liveness: app exited (code $($proc.ExitCode))$(Get-AppReasonSuffix)"
+            Write-AppDiagnostics
         } elseif ($proc.MainWindowHandle -eq [IntPtr]::Zero) {
             # Process alive but its window is no longer reachable: an environment
             # condition (window/desktop moved mid-run), not a product defect, so
