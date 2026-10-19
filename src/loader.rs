@@ -618,11 +618,18 @@ mod tests {
         let loader = ImageLoader::new();
         loader.prune(std::slice::from_ref(&path), 2048);
         loader.request(path.clone(), 2048);
-        // Wait until the preload worker has picked the job up.
+        // Wait until the preload worker has picked the job up. The deadline only
+        // guards against a hang: nothing about this test is a latency assertion,
+        // and on a loaded CI machine the worker thread can take seconds to be
+        // scheduled. Sleeping also matters more than it looks - spinning on
+        // yield_now() competes with the very worker being waited for.
         let start = std::time::Instant::now();
         while loader.shared.0.lock_recover().active.is_empty() {
-            assert!(start.elapsed() < std::time::Duration::from_secs(5));
-            std::thread::yield_now();
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(30),
+                "the preload worker never picked up the job"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
         }
         loader.select(1, path.clone(), 2048);
         loop {
