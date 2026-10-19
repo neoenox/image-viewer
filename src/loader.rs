@@ -48,6 +48,25 @@ pub(crate) struct DetailImage {
     pub key: DetailKey,
     pub rgba: image::RgbaImage,
 }
+/// Why an original-resolution region could not be produced.
+///
+/// The difference is what the view does next, not the wording. `TooLarge` is a
+/// property of the file that no later request can change: no decoder here reads
+/// a rectangle, so the whole source has to be expanded before anything can be
+/// cropped, and a source over the detail budget can never be expanded. `Failed`
+/// is worth retrying when the view moves, because it depends on the request
+/// (a region past the image edge, a region over the per-region budget, a codec
+/// error on a file that may yet change on disk).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum DetailError {
+    TooLarge,
+    Failed(String),
+}
+impl From<String> for DetailError {
+    fn from(reason: String) -> Self {
+        Self::Failed(reason)
+    }
+}
 type Key = (PathBuf, usize);
 enum Job {
     Current(u64, Key),
@@ -67,7 +86,7 @@ struct State {
     order: VecDeque<Key>,
     bytes: usize,
     result: Option<(u64, Result<CachedImage, String>)>,
-    detail_result: Option<Result<DetailImage, (DetailKey, String)>>,
+    detail_result: Option<Result<DetailImage, (DetailKey, DetailError)>>,
     keep: HashSet<PathBuf>,
     detail_src: Option<DetailSource>,
     stopping: bool,
@@ -293,7 +312,7 @@ impl ImageLoader {
         state.detail = Some((path, key));
         self.shared.1.notify_all();
     }
-    pub(crate) fn poll_detail(&self) -> Option<Result<DetailImage, (DetailKey, String)>> {
+    pub(crate) fn poll_detail(&self) -> Option<Result<DetailImage, (DetailKey, DetailError)>> {
         self.shared.0.lock_recover().detail_result.take()
     }
     pub fn take(&self, path: &Path, cap: usize) -> Option<CachedImage> {
@@ -421,7 +440,7 @@ fn detail_source(
     lock: &Mutex<State>,
     path: &Path,
     key: &DetailKey,
-) -> Result<Arc<image::RgbaImage>, String> {
+) -> Result<Arc<image::RgbaImage>, DetailError> {
     let modified = modified_time(path);
     if let Some(source) = &lock.lock_recover().detail_src {
         if source.path == path && source.rotation == key.rotation && source.modified == modified {
@@ -440,9 +459,15 @@ fn detail_source(
     }
     Ok(image)
 }
-fn decode_detail_source(path: &Path, rotation: u8) -> Result<image::RgbaImage, String> {
+fn decode_detail_source(path: &Path, rotation: u8) -> Result<image::RgbaImage, DetailError> {
     let image = decode_image_with_pixel_budget(path, DETAIL_SOURCE_RGBA_BUDGET)
-        .map_err(|e| e.to_string())?
+        .map_err(|e| match e {
+            // The dimension check and the decoder's own allocation limit both
+            // report `Limits`, and both mean the same thing here: this file's
+            // pixels do not fit, so no region of it can ever be produced.
+            image::ImageError::Limits(_) => DetailError::TooLarge,
+            other => DetailError::Failed(other.to_string()),
+        })?
         .into_rgba8();
     Ok(if rotation == 0 {
         image
@@ -451,18 +476,24 @@ fn decode_detail_source(path: &Path, rotation: u8) -> Result<image::RgbaImage, S
     })
 }
 #[cfg(test)]
-fn load_detail(path: &Path, key: &DetailKey) -> Result<image::RgbaImage, String> {
+fn load_detail(path: &Path, key: &DetailKey) -> Result<image::RgbaImage, DetailError> {
     crop_detail(&decode_detail_source(path, key.rotation)?, key)
 }
-fn crop_detail(image: &image::RgbaImage, key: &DetailKey) -> Result<image::RgbaImage, String> {
+fn crop_detail(image: &image::RgbaImage, key: &DetailKey) -> Result<image::RgbaImage, DetailError> {
     let [x, y, w, h] = key.region;
     if x >= image.width() || y >= image.height() || w == 0 || h == 0 {
-        return Err("画像サイズが変わりました。画像を開き直してください".into());
+        return Err(DetailError::Failed(
+            "画像サイズが変わりました。画像を開き直してください".into(),
+        ));
     }
     let w = w.min(image.width() - x);
     let h = h.min(image.height() - y);
     if u64::from(w) * u64::from(h) * 4 > CACHE_BUDGET as u64 {
-        return Err("原寸表示領域がメモリ上限を超えています".into());
+        // The source decoded fine, so this is about this request: a smaller
+        // region of the same file may well fit, which is why it is not TooLarge.
+        return Err(DetailError::Failed(
+            "原寸表示領域がメモリ上限を超えています".into(),
+        ));
     }
     Ok(image::imageops::crop_imm(image, x, y, w, h).to_image())
 }
@@ -839,10 +870,10 @@ mod poison_tests {
     #[test]
     fn a_panicking_decode_becomes_an_error() {
         assert_eq!(
-            catch_panic::<()>(|| panic!("codec bug")),
+            catch_panic::<(), String>(|| panic!("codec bug")),
             Err("decoder panicked".to_owned())
         );
-        assert_eq!(catch_panic(|| Ok(1)), Ok(1));
+        assert_eq!(catch_panic(|| Ok::<i32, String>(1)), Ok(1));
     }
 }
 #[cfg(test)]
@@ -858,8 +889,48 @@ mod detail_tests {
             rotation: 0,
             region: [1024, 1024, 128, 128],
         };
-        assert!(load_detail(&path, &key).is_err());
+        // A region past the edge depends on the request, so it stays retryable:
+        // only the *source* being over budget condemns the whole file.
+        assert!(matches!(
+            load_detail(&path, &key),
+            Err(DetailError::Failed(_))
+        ));
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn a_source_over_the_detail_budget_is_reported_as_permanently_too_large() {
+        let dir = std::env::temp_dir().join(format!("viewer-detail-huge-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("huge.png");
+        // Header-only 6000x6000: 137 MiB of RGBA, over the 128 MiB detail source
+        // budget, so the pre-decode dimension check rejects it with
+        // `ImageError::Limits` and nothing is allocated - the same error a
+        // wide-sample source hits when its decode buffer exceeds the budget.
+        crate::imaging::bomb_png(&path, 6000, 6000);
+        let loader = ImageLoader::new();
+        loader.select(1, path.clone(), 2048);
+        loader.detail(path.clone(), key(1, 0, [0, 0, 128, 128]));
+        let start = std::time::Instant::now();
+        let error = loop {
+            match loader.poll_detail() {
+                Some(Err((_, error))) => break error,
+                Some(Ok(_)) => panic!("a 6000x6000 source must not decode inside the budget"),
+                None => {}
+            }
+            assert!(start.elapsed() < std::time::Duration::from_secs(10));
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        };
+        assert_eq!(
+            error,
+            DetailError::TooLarge,
+            "the view decides whether to ask again from this, so it must not be a plain failure"
+        );
+        assert!(
+            source(&loader).is_none(),
+            "a rejected source must not be retained"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     fn key(generation: u64, rotation: u8, region: [u32; 4]) -> DetailKey {

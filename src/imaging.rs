@@ -90,6 +90,55 @@ pub(crate) fn downscale_to_cap(
         .ok_or_else(|| "resize produced a mismatched buffer".to_owned())
 }
 
+/// Minimal PNG claiming absurd dimensions: header only, no pixel data.
+///
+/// Construction succeeds and `dimensions()` reports the claim, so the budget
+/// checks reject it before a single pixel is allocated. Shared with the detail
+/// tests in `loader.rs`, which need an image that is over its budget without
+/// paying for a real one.
+#[cfg(test)]
+pub(crate) fn bomb_png(path: &Path, w: u32, h: u32) {
+    fn crc32(data: &[u8]) -> u32 {
+        let mut crc = 0xFFFF_FFFFu32;
+        for &byte in data {
+            crc ^= u32::from(byte);
+            for _ in 0..8 {
+                let mask = crc & 1;
+                crc >>= 1;
+                if mask != 0 {
+                    crc ^= 0xEDB8_8320;
+                }
+            }
+        }
+        !crc
+    }
+    fn chunk(kind: &[u8; 4], data: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        out.extend_from_slice(kind);
+        out.extend_from_slice(data);
+        let mut covered = Vec::from(&kind[..]);
+        covered.extend_from_slice(data);
+        out.extend_from_slice(&crc32(&covered).to_be_bytes());
+        out
+    }
+    let mut ihdr = Vec::new();
+    ihdr.extend_from_slice(&w.to_be_bytes());
+    ihdr.extend_from_slice(&h.to_be_bytes());
+    // 8-bit truecolor, default compression/filter/interlace.
+    ihdr.extend_from_slice(&[8, 2, 0, 0, 0]);
+    let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+    png.extend(chunk(b"IHDR", &ihdr));
+    // Valid but empty zlib stream: construction succeeds, pixel data is
+    // never touched because the dimension check rejects first.
+    png.extend(chunk(
+        b"IDAT",
+        &[0x78, 0x01, 0x01, 0x00, 0xFE, 0xFF, 0x00, 0x00, 0x00, 0x01],
+    ));
+    png.extend(chunk(b"IEND", &[]));
+    std::fs::write(path, png).unwrap();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -244,49 +293,6 @@ mod tests {
         assert_eq!(rotate_rgba(&base, 3).dimensions(), (2, 4));
         // Callers keep rotation in 0..4, but the function itself wraps.
         assert_eq!(rotate_rgba(&base, 5).dimensions(), (2, 4));
-    }
-
-    /// Minimal PNG claiming absurd dimensions: header only, no pixel data.
-    fn bomb_png(path: &Path, w: u32, h: u32) {
-        fn crc32(data: &[u8]) -> u32 {
-            let mut crc = 0xFFFF_FFFFu32;
-            for &byte in data {
-                crc ^= u32::from(byte);
-                for _ in 0..8 {
-                    let mask = crc & 1;
-                    crc >>= 1;
-                    if mask != 0 {
-                        crc ^= 0xEDB8_8320;
-                    }
-                }
-            }
-            !crc
-        }
-        fn chunk(kind: &[u8; 4], data: &[u8]) -> Vec<u8> {
-            let mut out = Vec::new();
-            out.extend_from_slice(&(data.len() as u32).to_be_bytes());
-            out.extend_from_slice(kind);
-            out.extend_from_slice(data);
-            let mut covered = Vec::from(&kind[..]);
-            covered.extend_from_slice(data);
-            out.extend_from_slice(&crc32(&covered).to_be_bytes());
-            out
-        }
-        let mut ihdr = Vec::new();
-        ihdr.extend_from_slice(&w.to_be_bytes());
-        ihdr.extend_from_slice(&h.to_be_bytes());
-        // 8-bit truecolor, default compression/filter/interlace.
-        ihdr.extend_from_slice(&[8, 2, 0, 0, 0]);
-        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
-        png.extend(chunk(b"IHDR", &ihdr));
-        // Valid but empty zlib stream: construction succeeds, pixel data is
-        // never touched because the dimension check rejects first.
-        png.extend(chunk(
-            b"IDAT",
-            &[0x78, 0x01, 0x01, 0x00, 0xFE, 0xFF, 0x00, 0x00, 0x00, 0x01],
-        ));
-        png.extend(chunk(b"IEND", &[]));
-        std::fs::write(path, png).unwrap();
     }
 
     #[test]
