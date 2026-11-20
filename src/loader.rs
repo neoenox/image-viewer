@@ -431,7 +431,7 @@ fn load((path, cap): &Key) -> Result<CachedImage, String> {
     let rgba = Arc::new(downscale_to_cap(image.into_rgba8(), (*cap).min(MAX_CAP))?);
     Ok(CachedImage { rgba, orig, gif })
 }
-fn modified_time(path: &Path) -> Option<std::time::SystemTime> {
+pub(crate) fn modified_time(path: &Path) -> Option<std::time::SystemTime> {
     std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 /// Decoded, rotated source for a detail request: reused while the file, its
@@ -465,6 +465,8 @@ fn decode_detail_source(path: &Path, rotation: u8) -> Result<image::RgbaImage, D
             // The dimension check and the decoder's own allocation limit both
             // report `Limits`, and both mean the same thing here: this file's
             // pixels do not fit, so no region of it can ever be produced.
+            // With the current decoder this is defensive: a source that passes
+            // the global 256 MiB check also fits the detail budget.
             image::ImageError::Limits(_) => DetailError::TooLarge,
             other => DetailError::Failed(other.to_string()),
         })?

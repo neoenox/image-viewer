@@ -38,6 +38,9 @@ impl eframe::App for ViewerApp {
         self.handle_keys(ctx);
         self.handle_wheel_nav(ctx);
         self.tick_slideshow(ctx);
+        if self.tick_status(Instant::now()) {
+            ctx.request_repaint_after(STATUS_TTL);
+        }
 
         self.sync_window_title(ctx);
 
@@ -476,10 +479,11 @@ impl ViewerApp {
     }
 
     /// ツールバーを表示するか。自動非表示が有効でも、固定中・ポインタが上端付近・
-    /// ファイル未読込・設定／関連付けダイアログの表示中は表示する。
+    /// ファイル未読込・設定／関連付けダイアログの表示中・ステータス表示中は表示する。
     fn toolbar_visible(&self, pointer_near_top: bool) -> bool {
         !self.settings.auto_hide_toolbar
             || self.toolbar_pinned
+            || !self.status_msg.is_empty()
             || pointer_near_top
             || self.files.is_empty()
             || self.show_settings
@@ -937,6 +941,10 @@ mod tests {
         app.show_settings = false;
         app.show_assoc = true;
         assert!(app.toolbar_visible(false), "association dialog open");
+        app.show_assoc = false;
+        app.status_msg = "エラー".into();
+        assert!(app.toolbar_visible(false), "status message is visible");
+        app.status_msg.clear();
     }
 
     #[test]
