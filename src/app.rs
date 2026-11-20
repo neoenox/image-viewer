@@ -142,7 +142,9 @@ pub struct ViewerApp {
     /// fail the same way, so the viewer stops asking instead of repeating a
     /// header read and a status line on every 128px pan step. Cleared when a
     /// different file is selected; rotation cannot help, since it does not
-    /// change how many pixels the source has.
+    /// change how many pixels the source has. With the current decoder this
+    /// state is unreachable: both budgets reject the same pixel count. It is a
+    /// guard for decoders that may allocate more per pixel in the future.
     pub(crate) detail_unavailable: bool,
     pub(crate) view_rect: egui::Rect,
     pub(crate) detail_key: Option<crate::loader::DetailKey>,

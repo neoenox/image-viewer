@@ -109,13 +109,8 @@ image **1 ms**, because the expanded source is kept while you pan across the sam
 image and rotation and dropped when you move to another file, rotate, or the file
 changes on disk.
 
-For 8-bit sources both limits fall on the same pixel count (33.5 megapixels), so
-the tighter budget only ever decides the outcome for wider samples - a 16-bit
-source whose decode buffer is larger than its RGBA estimate. When the source
-cannot be expanded at all, the viewer keeps the enlarged preview, says why in the
-status line, and stops asking for original pixels for that file until another
-image is opened: every region of such a file fails the same way, so retrying on
-each 128-pixel pan step would only repeat the check and the message. An in-flight
+Both the global decode ceiling and the detail-source budget currently reject the same pixel count (33.5 megapixels): a source whose preview decodes also fits the detail buffer, because the decoder allocates at most four bytes per pixel on this path. The "original pixels unavailable" fallback is therefore a defensive route, kept for decoders that may allocate more per pixel in the future. If it is ever taken, the viewer keeps the enlarged preview, says why in the status line, and stops asking for original pixels for that file until the file changes on disk or another image is opened: every region of such a file fails the same way, so retrying on each 128-pixel pan step would only repeat the check and the message.
+An in-flight
 decode finishes before cancellation is observed; pending current-image work takes
 precedence over preloads.
 

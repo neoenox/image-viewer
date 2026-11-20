@@ -465,6 +465,8 @@ fn decode_detail_source(path: &Path, rotation: u8) -> Result<image::RgbaImage, D
             // The dimension check and the decoder's own allocation limit both
             // report `Limits`, and both mean the same thing here: this file's
             // pixels do not fit, so no region of it can ever be produced.
+            // With the current decoder this is defensive: a source that passes
+            // the global 256 MiB check also fits the detail budget.
             image::ImageError::Limits(_) => DetailError::TooLarge,
             other => DetailError::Failed(other.to_string()),
         })?
