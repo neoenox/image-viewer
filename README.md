@@ -35,7 +35,7 @@ cargo llvm-cov --locked --all-targets --summary-only --fail-under-lines 85
 
 The CI `coverage` job runs exactly that and uploads the `lcov` report as the
 `coverage` artifact. The 85% floor is a floor, not a target: the measured total is
-**87.3%** of 6123 lines, so the two points of slack absorb runner variation while
+**88.8%** of 6177 lines, so nearly four points of slack absorb runner variation while
 any change adding a few hundred uncovered lines still fails. Raise the floor as
 coverage improves; do not lower it to make a red run green. Ignored benchmark
 tests do not run by default and are therefore not counted, and code behind
@@ -140,6 +140,9 @@ with it closed the viewer takes no timestamps at all. A load that fails does not
 record a sample, so a broken file cannot look like a slow one. The overlay is
 unstyled on purpose - it is a measuring instrument, not a feature of the UI.
 
+The overlay's own drawing is inside the measured frame time, so treat the numbers as relative comparisons (before vs. after a change) rather than an absolute rendering cost. The window keeps the most recent 120 frames, so just after opening F12 the median and p95 still include samples from before it was opened.
+
+Toolbar status messages disappear after five seconds, so the toolbar can auto-hide again after showing an error.
 ## Local verification scripts
 
 Windows helper scripts for preflight checks, generating the acceptance images,

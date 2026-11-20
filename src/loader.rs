@@ -431,7 +431,7 @@ fn load((path, cap): &Key) -> Result<CachedImage, String> {
     let rgba = Arc::new(downscale_to_cap(image.into_rgba8(), (*cap).min(MAX_CAP))?);
     Ok(CachedImage { rgba, orig, gif })
 }
-fn modified_time(path: &Path) -> Option<std::time::SystemTime> {
+pub(crate) fn modified_time(path: &Path) -> Option<std::time::SystemTime> {
     std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 /// Decoded, rotated source for a detail request: reused while the file, its

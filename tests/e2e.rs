@@ -209,32 +209,6 @@ fn rotate_swaps_dimensions() {
 }
 
 #[test]
-fn toggle_fit_zoom_logic() {
-    // 中クリック相当のトグルがヘッドレスでも正しく動くこと。
-    // （実機の不具合切り分け用：ここが通れば残るは入力検出側）
-    let dir = fixture_dir("toggle");
-    let ctx = headless_ctx();
-    let mut app = ViewerApp::new(None);
-    app.open_path(dir.join("z-big.jpg"), Some(&ctx));
-    settle(&mut app, &ctx);
-    assert!(app.is_fit());
-
-    let [tw, th] = app.texture_size().unwrap();
-    let avail = egui::vec2(1000.0, 700.0);
-    let center = egui::pos2(500.0, 350.0);
-    let cursor = egui::pos2(700.0, 400.0);
-
-    app.toggle_fit_zoom(cursor, center, avail, tw as f32, th as f32);
-    assert!(!app.is_fit());
-    assert!((app.zoom_level() - 1.0).abs() < 1e-3);
-
-    app.toggle_fit_zoom(cursor, center, avail, tw as f32, th as f32);
-    assert!(app.is_fit());
-    assert!((app.pan().x, app.pan().y) == (0.0, 0.0));
-    cleanup(&dir);
-}
-
-#[test]
 fn navigation_resets_view_state() {
     let dir = fixture_dir("reset");
     let ctx = headless_ctx();

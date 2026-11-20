@@ -38,6 +38,11 @@ pub(crate) const ORIENTED_CACHE_MAX_BYTES: usize = 64 * 1024 * 1024;
 /// ため数MiBで収まり、数画面分のスクロールバックを再デコードなしで返す。
 pub(crate) const THUMB_KEEP_MAX: usize = 64;
 
+/// ステータス行を表示し続ける時間。消えないと自動非表示のツールバーが固定される。
+pub(crate) const STATUS_TTL: Duration = Duration::from_secs(5);
+/// 現在ファイルの mtime を再読する最小間隔。毎フレームの metadata() を避ける。
+const MTIME_CHECK_INTERVAL: Duration = Duration::from_secs(1);
+
 pub fn setup_jp_font(ctx: &egui::Context) {
     let candidates = [
         "NotoSansJP-VF.ttf",
@@ -110,6 +115,12 @@ pub struct ViewerApp {
     pub(crate) slideshow_secs: f32,
     pub(crate) last_advance: Option<Instant>,
     pub(crate) status_msg: String,
+    /// ステータスが変わってから自動消去までの時刻と、表示中の文字列。
+    status_at: Option<Instant>,
+    status_seen: String,
+    /// 現在ファイルの mtime と、最後に読んだ時刻（更新検知の間引き用）。
+    current_mtime: Option<std::time::SystemTime>,
+    last_mtime_check: Option<Instant>,
     pub(crate) pan_offset: egui::Vec2,
     pub(crate) wheel_accum: f32,
     pub(crate) view_avail: egui::Vec2,
@@ -195,6 +206,10 @@ impl ViewerApp {
             slideshow_secs: 3.0,
             last_advance: None,
             status_msg: String::new(),
+            status_at: None,
+            status_seen: String::new(),
+            current_mtime: None,
+            last_mtime_check: None,
             pan_offset: egui::Vec2::ZERO,
             wheel_accum: 0.0,
             view_avail: egui::vec2(1000.0, 700.0),
@@ -311,6 +326,8 @@ impl ViewerApp {
         self.detail_pending = false;
         self.detail_unavailable = false;
         self.status_msg.clear();
+        self.status_at = None;
+        self.status_seen.clear();
         self.load_error = None;
         self.texture = None;
         self.base = None;
@@ -326,6 +343,8 @@ impl ViewerApp {
         let Some(path) = self.current_path().map(Path::to_path_buf) else {
             return;
         };
+        self.current_mtime = crate::loader::modified_time(&path);
+        self.last_mtime_check = Some(Instant::now());
         self.loading = true;
         // 「選択 → 表示」の起点。監視中だけ記録する。
         if self.show_stats {
@@ -336,6 +355,58 @@ impl ViewerApp {
         if let Some(ctx) = ctx {
             ctx.request_repaint();
         }
+    }
+
+    /// 現在のファイルがディスク上で差し替えられたら、恒久失敗の判定を捨てる。
+    /// 原寸ガードとGIFフレーム取得時に呼び、ユーザー操作の瞬間に回復させる。
+    pub(crate) fn refresh_current_file(&mut self) {
+        let now = Instant::now();
+        if self
+            .last_mtime_check
+            .is_some_and(|at| now.duration_since(at) < MTIME_CHECK_INTERVAL)
+        {
+            return;
+        }
+        self.last_mtime_check = Some(now);
+        let Some(path) = self.current_path().map(Path::to_path_buf) else {
+            return;
+        };
+        let mtime = crate::loader::modified_time(&path);
+        if mtime == self.current_mtime {
+            return;
+        }
+        self.current_mtime = mtime;
+        self.detail_unavailable = false;
+        self.status_msg.clear();
+        self.status_at = None;
+        self.status_seen.clear();
+        if self.animation.is_some() {
+            self.animation = Some(crate::animation::Animation::new(path, self.tex_cap));
+            self.anim_due = Some(now);
+        }
+    }
+
+    /// ステータス行を一定時間で消す。残り続けると自動非表示のツールバーが固定される。
+    pub(crate) fn tick_status(&mut self, now: Instant) -> bool {
+        if self.status_msg.is_empty() {
+            self.status_at = None;
+            self.status_seen.clear();
+            return false;
+        }
+        if self.status_seen != self.status_msg {
+            self.status_seen = self.status_msg.clone();
+            self.status_at = Some(now);
+            return true;
+        }
+        if self
+            .status_at
+            .is_some_and(|at| now.duration_since(at) >= STATUS_TTL)
+        {
+            self.status_msg.clear();
+            self.status_seen.clear();
+            self.status_at = None;
+        }
+        false
     }
 
     /// Apply completed worker results only for the current selection.
@@ -366,6 +437,7 @@ impl ViewerApp {
                 }
             }
         }
+        self.refresh_current_file();
         if self.anim_due.is_some_and(|due| Instant::now() >= due) {
             if let Some(frame) = self.animation.as_mut().and_then(|a| a.poll()) {
                 match frame {
@@ -666,25 +738,6 @@ impl ViewerApp {
         }
     }
 
-    /// 中クリック相当：フィット⇔1:1切替。1:1化はカーソル位置基準。
-    pub fn toggle_fit_zoom(
-        &mut self,
-        cursor: egui::Pos2,
-        center: egui::Pos2,
-        avail: egui::Vec2,
-        iw: f32,
-        ih: f32,
-    ) {
-        if self.fit {
-            let old = self.current_scale(avail, iw, ih);
-            self.zoom_at(1.0 / old, cursor, center, old, avail, iw, ih);
-        } else {
-            self.fit = true;
-            self.zoom = 1.0;
-            self.pan_offset = egui::Vec2::ZERO;
-        }
-    }
-
     /// ホバー位置連動の視点移動量。tは領域内の正規化位置(0.0..1.0)。
     /// 左端で画像左側、右端で右側が見える。
     /// GAINでマウス移動に対する追従を鋭くする（中央からの半分の移動で端に届く）。
@@ -896,6 +949,7 @@ impl ViewerApp {
     }
 
     pub(crate) fn request_detail(&mut self, region: [u32; 4]) {
+        self.refresh_current_file();
         if self.is_animated() || self.detail_unavailable {
             return;
         }
@@ -1788,5 +1842,150 @@ mod tests {
         // Served from a per-request rotation: no second full copy is kept.
         assert!(app.oriented_base.is_none());
         assert!(app.upscale_tex.is_some());
+    }
+
+    #[test]
+    fn status_message_auto_clears_after_five_seconds() {
+        let mut app = ViewerApp::new(None);
+        let base = Instant::now();
+        app.status_msg = "原寸表示は使えません".into();
+        assert!(app.tick_status(base), "a new status schedules one repaint");
+        assert!(!app.status_msg.is_empty());
+        assert!(!app.tick_status(base + Duration::from_secs(4)));
+        assert!(!app.status_msg.is_empty());
+        assert!(!app.tick_status(base + Duration::from_secs(5)));
+        assert!(app.status_msg.is_empty(), "status must expire");
+    }
+
+    #[test]
+    fn changed_status_restarts_the_visibility_window() {
+        let mut app = ViewerApp::new(None);
+        let base = Instant::now();
+        app.status_msg = "最初".into();
+        app.tick_status(base);
+        app.tick_status(base + Duration::from_secs(4));
+        app.status_msg = "次".into();
+        app.tick_status(base + Duration::from_secs(4));
+        app.tick_status(base + Duration::from_secs(8));
+        assert!(
+            !app.status_msg.is_empty(),
+            "a new message gets its own five seconds"
+        );
+        app.tick_status(base + Duration::from_secs(9));
+        assert!(app.status_msg.is_empty());
+    }
+
+    #[test]
+    fn file_change_clears_detail_unavailable() {
+        let dir = std::env::temp_dir().join(format!("iv-mtime-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("a.png");
+        image::RgbaImage::new(4, 4).save(&path).unwrap();
+
+        let mut app = ViewerApp::new(None);
+        app.files = vec![path.clone()];
+        app.detail_unavailable = true;
+        app.current_mtime = Some(std::time::SystemTime::UNIX_EPOCH);
+        app.last_mtime_check = None;
+        app.refresh_current_file();
+
+        assert!(
+            !app.detail_unavailable,
+            "a replaced file must be re-evaluated"
+        );
+        assert_ne!(app.current_mtime, Some(std::time::SystemTime::UNIX_EPOCH));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn mtime_checks_are_throttled() {
+        let dir = std::env::temp_dir().join(format!("iv-throttle-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("a.png");
+        image::RgbaImage::new(4, 4).save(&path).unwrap();
+
+        let mut app = ViewerApp::new(None);
+        app.files = vec![path.clone()];
+        app.detail_unavailable = true;
+        app.current_mtime = Some(std::time::SystemTime::UNIX_EPOCH);
+        app.last_mtime_check = Some(Instant::now());
+        app.refresh_current_file();
+
+        assert!(
+            app.detail_unavailable,
+            "no filesystem read inside the throttle interval"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn rewritten_file_recovers_detail_with_real_mtime() {
+        let dir = std::env::temp_dir().join(format!("iv-real-mtime-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("a.png");
+        image::RgbaImage::new(4, 4).save(&path).unwrap();
+        let first = crate::loader::modified_time(&path).unwrap();
+
+        let mut app = ViewerApp::new(None);
+        app.files = vec![path.clone()];
+        app.current_mtime = Some(first);
+        app.detail_unavailable = true;
+        app.last_mtime_check = None;
+        app.refresh_current_file();
+        assert!(
+            app.detail_unavailable,
+            "an unchanged file must not clear the flag"
+        );
+
+        let newer = first + Duration::from_secs(10);
+        let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        file.set_modified(newer).unwrap();
+        drop(file);
+        assert_eq!(crate::loader::modified_time(&path), Some(newer));
+
+        app.last_mtime_check = None;
+        app.refresh_current_file();
+        assert!(
+            !app.detail_unavailable,
+            "a real overwrite must recover detail"
+        );
+        assert_eq!(app.current_mtime, Some(newer));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn file_change_restarts_gif_player() {
+        use image::codecs::gif::{GifEncoder, Repeat};
+        let dir = std::env::temp_dir().join(format!("iv-gif-restart-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("a.gif");
+        {
+            let mut encoder = GifEncoder::new(std::fs::File::create(&path).unwrap());
+            encoder.set_repeat(Repeat::Infinite).unwrap();
+            encoder
+                .encode_frame(image::Frame::from_parts(
+                    image::RgbaImage::from_pixel(2, 2, image::Rgba([1, 2, 3, 255])),
+                    0,
+                    0,
+                    image::Delay::from_numer_denom_ms(20, 1),
+                ))
+                .unwrap();
+        }
+
+        let mut app = ViewerApp::new(None);
+        app.files = vec![path.clone()];
+        app.animation = Some(crate::animation::Animation::new(path.clone(), 2048));
+        app.current_mtime = Some(std::time::SystemTime::UNIX_EPOCH);
+        app.last_mtime_check = None;
+        app.refresh_current_file();
+
+        assert!(app.anim_due.is_some(), "the new player is due immediately");
+        app.animation = None;
+        for _ in 0..100 {
+            if std::fs::remove_dir_all(&dir).is_ok() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
     }
 }
