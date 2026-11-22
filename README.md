@@ -59,6 +59,10 @@ The installer also runs `image-viewer.exe --check-update`, so a newer release
 is verified and staged silently during installation and applied at the next
 launch. Use `scripts\uninstall.ps1` to reverse it.
 
+Windows protects the double-click default (`UserChoice`), so the installer
+registers the viewer as a candidate but cannot make it the default. Finish that
+in Settings > Default apps if needed.
+
 ## Releasing
 
 Pushing a `v*` tag runs `.github/workflows/release.yml`, which tests, builds, and

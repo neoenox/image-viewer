@@ -28,7 +28,12 @@ if ([string]::IsNullOrWhiteSpace($ScriptDir)) {
 }
 
 if ([string]::IsNullOrWhiteSpace($ExePath)) {
-    $ExePath = Join-Path $PSScriptRoot "..\target\release\image-viewer.exe"
+    $nextToScript = Join-Path $ScriptDir "image-viewer.exe"
+    if (Test-Path -LiteralPath $nextToScript -PathType Leaf) {
+        $ExePath = $nextToScript
+    } else {
+        $ExePath = Join-Path $ScriptDir "..\target\release\image-viewer.exe"
+    }
 }
 if (-not (Test-Path -LiteralPath $ExePath -PathType Leaf)) {
     throw "exeが見つかりません: $ExePath（先に cargo build --release してください）"
