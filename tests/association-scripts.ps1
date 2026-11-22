@@ -84,6 +84,8 @@ try {
     # ハイブ差し替えが漏れて実際の HKCU を触っていないこと。
     Assert-True ((Test-Path -LiteralPath $realProg) -eq $realProgExisted) 'real HKCU ProgID was touched'
     Assert-True ((Test-Path -LiteralPath $realCaps) -eq $realCapsExisted) 'real HKCU Capabilities was touched'
+    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'installer-scripts.ps1')
+    if ($LASTEXITCODE -ne 0) { throw "installer scripts failed" }
     Write-Output 'PASS: repeated registration, restoration, and preservation of other-app settings'
 } finally {
     $env:LOCALAPPDATA = $savedLocalAppData
