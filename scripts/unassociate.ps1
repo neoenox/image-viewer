@@ -6,11 +6,19 @@
   - 削除範囲は assoc.rs の unregister と同一（ProgID / Applications/<exe名> /
     Capabilities配下 / RegisteredApplications値）。他アプリの値は触りません。
   - 拡張子の既定値とUserChoiceは変更しません。
+  - exeが見つからない場合（アップグレード・アンインストール時）は、既定値または
+    明示指定した ProgId/AppName/CapsBase/AppExe で削除を続行します。
   - 注意: ExplorerのUserChoiceハッシュは復元できないため、
     ダブルクリックの既定が期待と違う場合はUIから選び直してください
+.PARAMETER ExePath
+  設定を読み出すexe。省略時は既定の定数を使用します。
 #>
 param(
-    [string]$ExePath = ""
+    [string]$ExePath = "",
+    [string]$ProgId = "",
+    [string]$AppName = "",
+    [string]$CapsBase = "",
+    [string]$AppExe = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -36,20 +44,26 @@ function Get-AssocConfig([string]$Exe) {
     return $config
 }
 
-if ([string]::IsNullOrWhiteSpace($ExePath)) {
-    $ExePath = Join-Path $PSScriptRoot "..\target\release\image-viewer.exe"
+# exe が読めるときは exe を正本にする。読めないときは assoc.rs と同じ定数を
+# 既定値として使い、アンインストール時に登録が残らないようにする。
+$config = $null
+if (-not [string]::IsNullOrWhiteSpace($ExePath)) {
+    if (-not (Test-Path -LiteralPath $ExePath -PathType Leaf)) {
+        throw "exeが見つかりません: $ExePath（定数を直接指定するか、exeを復元してください）"
+    }
+    $config = Get-AssocConfig -Exe (Resolve-Path -LiteralPath $ExePath).Path
 }
-$ExePath = (Resolve-Path -LiteralPath $ExePath).Path
-if (-not (Test-Path -LiteralPath $ExePath -PathType Leaf)) {
-    throw "exeが見つかりません: $ExePath（先に cargo build してください）"
+$progId = if ($null -ne $config) { $config['prog_id'] } elseif ($ProgId) { $ProgId } else { 'ImageViewer.App' }
+$appName = if ($null -ne $config) { $config['app_name'] } elseif ($AppName) { $AppName } else { '画像ビューワー' }
+$capsBase = if ($null -ne $config) { $config['caps_base'] } elseif ($CapsBase) { $CapsBase } else { 'Software\ImageViewer\Capabilities' }
+$appExe = if ($null -ne $config) { $config['app_exe'] } elseif ($AppExe) { $AppExe } else { 'image-viewer.exe' }
+foreach ($name in @('progId', 'appExe')) {
+    if ((Get-Variable -Name $name).Value -match '[\\/]') { throw "不正な値です: $name" }
 }
 
-$cfg = Get-AssocConfig -Exe $ExePath
-$progId = $cfg['prog_id']
-$appName = $cfg['app_name']
 Remove-Item -LiteralPath "HKCU:\Software\Classes\$progId" -Recurse -Force -ErrorAction SilentlyContinue
-Remove-Item -LiteralPath "HKCU:\Software\Classes\Applications\$($cfg['app_exe'])" -Recurse -Force -ErrorAction SilentlyContinue
-Remove-Item -LiteralPath "HKCU:\$($cfg['caps_base'])" -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath "HKCU:\Software\Classes\Applications\$appExe" -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath "HKCU:\$capsBase" -Recurse -Force -ErrorAction SilentlyContinue
 Remove-ItemProperty -LiteralPath "HKCU:\Software\RegisteredApplications" -Name $appName -ErrorAction SilentlyContinue
 
 Add-Type @"

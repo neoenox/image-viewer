@@ -56,7 +56,9 @@ impl Animation {
                             image::codecs::gif::GifDecoder::new(std::io::BufReader::new(file))
                                 .map_err(|e| e.to_string())?;
                         let (w, h) = decoder.dimensions();
-                        if u64::from(w) * u64::from(h) * 8 > DECODE_BUDGET {
+                        if u64::from(w).saturating_mul(u64::from(h)).saturating_mul(8)
+                            > DECODE_BUDGET
+                        {
                             return Err("GIFの画像サイズがメモリ上限を超えています".into());
                         }
                         let mut limits = image::Limits::default();
@@ -204,13 +206,12 @@ mod tests {
     }
 
     #[test]
-    fn partial_frame_is_composited_onto_full_canvas() {
+    fn nonzero_offset_frame_is_composited_at_its_position() {
         use image::codecs::gif::{GifEncoder, Repeat};
-        let path = std::env::temp_dir().join(format!("viewer-partial-{}.gif", std::process::id()));
+        let path = std::env::temp_dir().join(format!("viewer-offset-{}.gif", std::process::id()));
         {
             let mut encoder = GifEncoder::new(std::fs::File::create(&path).unwrap());
             encoder.set_repeat(Repeat::Infinite).unwrap();
-            // Full-canvas red base frame.
             encoder
                 .encode_frame(image::Frame::from_parts(
                     image::RgbaImage::from_pixel(4, 3, image::Rgba([255, 0, 0, 255])),
@@ -219,10 +220,6 @@ mod tests {
                     image::Delay::from_numer_denom_ms(20, 1),
                 ))
                 .unwrap();
-            // Smaller blue patch: the decoder must composite it onto the
-            // canvas, not hand through a 2x2 image. (The encoder drops the
-            // offset, so the patch lands at the top-left; the point here is
-            // the full-canvas composite our pipeline serves.)
             encoder
                 .encode_frame(image::Frame::from_parts(
                     image::RgbaImage::from_pixel(2, 2, image::Rgba([0, 0, 255, 255])),
@@ -232,20 +229,29 @@ mod tests {
                 ))
                 .unwrap();
         }
+        // `GifEncoder` writes smaller frames at (0,0). Patch the second image
+        // descriptor's left/top fields so the decoder must honour a real
+        // nonzero offset instead of a full-canvas first frame.
+        let mut bytes = std::fs::read(&path).unwrap();
+        let descriptor = bytes
+            .windows(9)
+            .position(|w| w[0] == 0x2C && w[1..5] == [0, 0, 0, 0] && w[5..9] == [2, 0, 2, 0])
+            .expect("second frame's image descriptor");
+        bytes[descriptor + 1] = 2; // left = 2
+        bytes[descriptor + 3] = 1; // top = 1
+        std::fs::write(&path, bytes).unwrap();
+
         let mut stream = Animation::new(path.clone(), 2048);
         let start = std::time::Instant::now();
-        // Skip the base frame; the next frame is the composited patch.
         let mut seen = 0;
         loop {
             if let Some(frame) = stream.poll() {
                 let frame = frame.unwrap();
                 if seen == 1 {
                     assert_eq!(frame.rgba.dimensions(), (4, 3));
-                    assert_eq!(frame.rgba.get_pixel(0, 0).0, [0, 0, 255, 255]);
-                    assert_eq!(frame.rgba.get_pixel(1, 1).0, [0, 0, 255, 255]);
-                    // Outside the patch: previous frame was disposed.
-                    assert_eq!(frame.rgba.get_pixel(2, 0).0, [0, 0, 0, 0]);
-                    assert_eq!(frame.rgba.get_pixel(0, 2).0, [0, 0, 0, 0]);
+                    assert_eq!(frame.rgba.get_pixel(2, 1).0, [0, 0, 255, 255]);
+                    assert_eq!(frame.rgba.get_pixel(3, 2).0, [0, 0, 255, 255]);
+                    assert_eq!(frame.rgba.get_pixel(0, 0).0, [0, 0, 0, 0]);
                     break;
                 }
                 seen += 1;
@@ -309,10 +315,9 @@ mod tests {
     }
 
     #[test]
-    fn worker_panic_surfaces_as_sticky_error() {
-        // Documents the wiring used by the stream worker: a codec panic
-        // becomes the sticky Err the UI shows, instead of a silent hang on a
-        // dead worker thread (same contract as the image loader).
+    fn panic_helper_converts_codec_panics_to_errors() {
+        // Helper-level contract only; the worker's sticky error path is covered
+        // by `failure_is_sticky_and_distinguishable_from_pending` below.
         let result: Result<(), String> = catch_panic(|| panic!("codec bug"));
         assert_eq!(result, Err("decoder panicked".to_owned()));
     }

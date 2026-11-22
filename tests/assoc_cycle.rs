@@ -260,9 +260,10 @@ fn register_update_unregister_reregister_cycle() {
 }
 
 #[test]
-fn shell_notify_conditions() {
-    // Notify is fire-and-forget: register/unregister must at least not panic,
-    // and validation failure must write nothing (hence notify nothing).
+fn register_unregister_validate_without_panicking() {
+    // SHChangeNotify has no observable state. This checks that valid and
+    // invalid registrations complete without panicking and that validation
+    // failure writes nothing; it cannot assert that a notification fired.
     let mut guard = IsolatedAssoc::new("notify");
     let hkcu = hkcu();
     let mut attempts: u64 = 0;

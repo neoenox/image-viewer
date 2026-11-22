@@ -53,10 +53,10 @@ function Get-AssocConfig([string]$Exe) {
 if ([string]::IsNullOrWhiteSpace($ExePath)) {
     $ExePath = Join-Path $PSScriptRoot "..\target\release\image-viewer.exe"
 }
-$ExePath = (Resolve-Path -LiteralPath $ExePath).Path
 if (-not (Test-Path -LiteralPath $ExePath -PathType Leaf)) {
     throw "exeが見つかりません: $ExePath（先に cargo build してください）"
 }
+$ExePath = (Resolve-Path -LiteralPath $ExePath).Path
 
 $cfg = Get-AssocConfig -Exe $ExePath
 $progId = $cfg['prog_id']

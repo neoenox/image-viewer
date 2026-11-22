@@ -35,9 +35,8 @@ fn decode_image_with_budget_and_format(
     let (w, h) = image::ImageDecoder::dimensions(&decoder);
     // Includes formats whose decoder only partially supports allocation limits:
     // reject sources whose 16-bit form would exceed the global decode ceiling.
-    if u64::from(w) * u64::from(h) * 8 > DECODE_BUDGET
-        || u64::from(w) * u64::from(h) * 4 > max_rgba_bytes
-    {
+    let pixels = u64::from(w).saturating_mul(u64::from(h));
+    if pixels.saturating_mul(8) > DECODE_BUDGET || pixels.saturating_mul(4) > max_rgba_bytes {
         return Err(image::ImageError::Limits(
             image::error::LimitError::from_kind(image::error::LimitErrorKind::InsufficientMemory),
         ));
@@ -177,6 +176,20 @@ mod tests {
         assert!(decode_image_with_pixel_budget(&path, 32 * 32 * 4 - 1).is_err());
         assert!(decode_image_with_pixel_budget(&path, 32 * 32 * 4).is_ok());
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn absurd_dimensions_are_rejected_without_overflow() {
+        let path =
+            std::env::temp_dir().join(format!("iv-bomb-overflow-{}.png", std::process::id()));
+        bomb_png(&path, u32::MAX, u32::MAX);
+        let result = decode_image_with_pixel_budget(&path, max_rgba_bytes_for_test());
+        assert!(result.is_err(), "absurd header must be rejected");
+        std::fs::remove_file(path).unwrap();
+    }
+
+    fn max_rgba_bytes_for_test() -> u64 {
+        DECODE_BUDGET
     }
 
     #[test]

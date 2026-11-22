@@ -71,6 +71,7 @@ const KNOWN_KEYS: &[&str] = &[
     "window_y",
     "window_maximized",
     "restore_window",
+    "auto_update",
 ];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -93,6 +94,8 @@ pub struct ViewerSettings {
     /// Reopen with the last window size, position and maximized state.
     /// Off always opens centered at the default size, not maximized.
     pub restore_window: bool,
+    /// Check for a newer release at startup (staged silently, applied next launch).
+    pub auto_update: bool,
     /// `key=value` lines from a newer release, kept verbatim and re-emitted
     /// on save. `version` is excluded (always emitted as the header).
     pub unknown: Vec<(String, String)>,
@@ -111,6 +114,7 @@ impl Default for ViewerSettings {
             window_y: None,
             window_maximized: false,
             restore_window: true,
+            auto_update: true,
             unknown: Vec::new(),
         }
     }
@@ -188,6 +192,7 @@ impl ViewerSettings {
                 "auto_hide_toolbar" => settings.auto_hide_toolbar = value,
                 "window_maximized" => settings.window_maximized = value,
                 "restore_window" => settings.restore_window = value,
+                "auto_update" => settings.auto_update = value,
                 _ => {}
             }
         }
@@ -215,6 +220,7 @@ impl ViewerSettings {
         }
         text.push_str(&format!("window_maximized={}\n", self.window_maximized));
         text.push_str(&format!("restore_window={}\n", self.restore_window));
+        text.push_str(&format!("auto_update={}\n", self.auto_update));
         // Future fields carried verbatim (see `unknown`): re-emit last so a
         // reload parses them back identically.
         for (key, value) in &self.unknown {
@@ -314,6 +320,7 @@ mod tests {
             window_y: Some(-20),
             window_maximized: true,
             restore_window: false,
+            auto_update: false,
             unknown: Vec::new(),
         };
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -345,7 +352,12 @@ mod tests {
         .unwrap();
         let loaded = ViewerSettings::load(&path);
         assert!(!loaded.hover_pan);
-        assert!(loaded.hold_to_peek && loaded.wheel_navigation && loaded.auto_hide_toolbar);
+        assert!(
+            loaded.hold_to_peek
+                && loaded.wheel_navigation
+                && loaded.auto_hide_toolbar
+                && loaded.auto_update
+        );
         assert_eq!(loaded.zoom_quality, ZoomQuality::High);
         std::fs::write(&path, "zoom_quality=standard\n").unwrap();
         assert_eq!(

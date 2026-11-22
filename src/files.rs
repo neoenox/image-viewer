@@ -12,6 +12,19 @@ pub fn is_supported(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Windows filesystems are case-insensitive; `Path`'s `PartialEq` is not.
+/// Compare canonical identities when the byte forms differ so the opened file
+/// is not appended twice to the sibling list.
+pub(crate) fn same_file_path(a: &Path, b: &Path) -> bool {
+    if a == b {
+        return true;
+    }
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
+}
+
 /// ファイル名の自然順ソート用に、末尾の連番を数値として比較する。
 /// "1.png" < "2.png" < "10.png" の順になる（辞書順だと "10" < "2" になる問題の対策）。
 /// 数字の先頭ゼロは少ない方を先にする（"001" < "01" < "1"）。
@@ -108,7 +121,7 @@ pub fn collect_siblings(path: &Path) -> Vec<PathBuf> {
         Err(_) => return vec![path.to_path_buf()],
     };
     sort_image_files(&mut files);
-    if !files.iter().any(|p| p == path) {
+    if !files.iter().any(|p| same_file_path(p, path)) {
         files.push(path.to_path_buf());
         sort_image_files(&mut files);
     }
@@ -197,6 +210,21 @@ mod performance_regression_tests {
             "BENCH sort 20000 files: {:.1} ms",
             elapsed.as_secs_f64() * 1000.0
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn case_mismatched_path_does_not_duplicate_sibling() {
+        let dir = std::env::temp_dir().join(format!("iv-path-case-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let on_disk = dir.join("photo.png");
+        image::RgbaImage::new(2, 2).save(&on_disk).unwrap();
+        let supplied = dir.join("PHOTO.PNG");
+        assert!(same_file_path(&on_disk, &supplied));
+        let files = collect_siblings(&supplied);
+        assert_eq!(files.len(), 1, "same file appeared twice: {files:?}");
+        assert_eq!(files[0], on_disk);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }
 

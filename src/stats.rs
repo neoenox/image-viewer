@@ -32,8 +32,12 @@ fn percentile(samples: &VecDeque<f32>, q: f32) -> Option<f32> {
     }
     let mut values: Vec<f32> = samples.iter().copied().collect();
     values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let index = ((values.len() - 1) as f32 * q.clamp(0.0, 1.0)).round() as usize;
-    Some(values[index.min(values.len() - 1)])
+    // Nearest-rank definition: ceil(q*n)-1, not round((n-1)*q). The latter
+    // reports a rank too low while the 120-sample window is still filling.
+    let index = ((q.clamp(0.0, 1.0) * values.len() as f32).ceil() as usize)
+        .saturating_sub(1)
+        .min(values.len() - 1);
+    Some(values[index])
 }
 
 /// 中央値。偶数個は中央2つの平均（最近傍順位法だと 1..=100 の中央値が
@@ -188,6 +192,8 @@ mod tests {
         assert_eq!(median(&odd), Some(3.0));
         assert_eq!(median(&VecDeque::new()), None);
         assert_eq!(percentile(&VecDeque::new(), 0.95), None);
+        let short: VecDeque<f32> = (1..=13).map(|v| v as f32).collect();
+        assert_eq!(percentile(&short, 0.95), Some(13.0));
     }
 
     #[test]

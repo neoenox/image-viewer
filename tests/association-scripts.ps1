@@ -50,6 +50,10 @@ try {
     $appName = $config['app_name']
     $capsBase = $config['caps_base']
     Assert-True (-not [string]::IsNullOrWhiteSpace($progId)) 'prog_idを取得できませんでした'
+    $realProg = "HKCU:\Software\Classes\$progId"
+    $realCaps = "HKCU:\$capsBase"
+    $realProgExisted = Test-Path -LiteralPath $realProg
+    $realCapsExisted = Test-Path -LiteralPath $realCaps
     & $associate -ExePath $exe
     Assert-AssociationsPreserved
     # 登録が実際に行われたこと（空振りでないこと）。
@@ -70,6 +74,16 @@ try {
     Assert-True ($jpg.PSObject.Properties.Name -notcontains '(default)') 'Viewer default was not removed'
     $png = Get-ItemProperty 'IVReview:\Software\Classes\.png'
     Assert-True ($png.'(default)' -eq 'Original.Png') 'Original default was not restored'
+    # 実exeを渡さないアンインストール（定数フォールバック）も効くこと。
+    Assert-True ($progId -eq 'ImageViewer.App' -and $capsBase -eq 'Software\ImageViewer\Capabilities') 'fallback constants drifted from exe config'
+    & $associate -ExePath $exe
+    & $unassociate -ProgId $progId -AppName $appName -CapsBase $capsBase -AppExe $config['app_exe']
+    Assert-AssociationsPreserved
+    Assert-True (-not (Test-Path "IVReview:\Software\Classes\$progId")) 'ProgID key survived no-exe cleanup'
+    Assert-True (-not (Test-Path "IVReview:\$capsBase")) 'Capabilities survived no-exe cleanup'
+    # ハイブ差し替えが漏れて実際の HKCU を触っていないこと。
+    Assert-True ((Test-Path -LiteralPath $realProg) -eq $realProgExisted) 'real HKCU ProgID was touched'
+    Assert-True ((Test-Path -LiteralPath $realCaps) -eq $realCapsExisted) 'real HKCU Capabilities was touched'
     Write-Output 'PASS: repeated registration, restoration, and preservation of other-app settings'
 } finally {
     $env:LOCALAPPDATA = $savedLocalAppData
