@@ -9,14 +9,15 @@
 //! by restoring the backup before retrying.
 //!
 //! `--no-update` skips the background check. Successful checks are throttled
-//! to once per 24 hours. Failures are logged to `update/update.log` and
-//! otherwise ignored.
+//! to once per 24 hours. Outcomes (applied, staged or failed) are shown
+//! briefly in the status line and logged to `update/update.log`.
 
 use std::cmp::Ordering;
 use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const RELEASE_BASE: &str = "https://github.com/neoenox/image-viewer/releases/latest/download/";
@@ -55,21 +56,22 @@ fn curl_program() -> PathBuf {
     PathBuf::from("curl.exe")
 }
 
-/// Called at the very start of `run()`. Applies a previously staged update.
-pub fn apply_pending() {
-    if let Some(dir) = update_dir() {
-        let current = match std::env::current_exe() {
-            Ok(path) => path,
-            Err(_) => return,
-        };
-        if let Err(error) = apply_pending_in(&current, &dir, env!("CARGO_PKG_VERSION")) {
-            log_error(&dir, &error);
-        }
+pub fn apply_pending() -> Result<Option<String>, String> {
+    let Some(dir) = update_dir() else {
+        return Ok(None);
+    };
+    let Ok(current) = std::env::current_exe() else {
+        return Ok(None);
+    };
+    let result = apply_pending_in(&current, &dir, env!("CARGO_PKG_VERSION"));
+    if let Err(error) = &result {
+        log_error(&dir, error);
     }
+    result
 }
 
-/// Applies a staged update to `current`, returning true when a swap happened.
-fn apply_pending_in(current: &Path, dir: &Path, version: &str) -> Result<bool, String> {
+/// Applies a staged update, returning its version when the swap happened.
+fn apply_pending_in(current: &Path, dir: &Path, version: &str) -> Result<Option<String>, String> {
     let pending = dir.join(PENDING_EXE);
     let hash_file = dir.join(PENDING_HASH);
     let version_file = dir.join(PENDING_VERSION);
@@ -100,13 +102,14 @@ fn apply_pending_in(current: &Path, dir: &Path, version: &str) -> Result<bool, S
 
     if !pending.is_file() {
         discard();
-        return Ok(false);
+        return Ok(None);
     }
     let staged_version =
         fs::read_to_string(&version_file).map_err(|e| format!("staged version unreadable: {e}"))?;
-    if compare_versions(staged_version.trim(), version) != Ordering::Greater {
+    let applied_version = staged_version.trim().to_owned();
+    if compare_versions(&applied_version, version) != Ordering::Greater {
         discard();
-        return Ok(false);
+        return Ok(None);
     }
     let expected =
         fs::read_to_string(&hash_file).map_err(|e| format!("staged hash unreadable: {e}"))?;
@@ -134,7 +137,7 @@ fn apply_pending_in(current: &Path, dir: &Path, version: &str) -> Result<bool, S
     let _ = fs::remove_file(&backup);
     cleanup_metadata();
     let _ = fs::remove_file(&pending);
-    Ok(true)
+    Ok(Some(applied_version))
 }
 
 fn unix_seconds() -> u64 {
@@ -160,8 +163,8 @@ fn record_check(dir: &Path) {
     let _ = fs::write(dir.join(LAST_CHECK), unix_seconds().to_string());
 }
 
-/// Starts the release check off the UI thread. Failures are intentionally quiet.
-pub fn start_background_check(version: &str) {
+/// Starts the release check off the UI thread and publishes its outcome.
+pub fn start_background_check_with_notice(version: &str, notice: Arc<Mutex<Option<String>>>) {
     #[cfg(windows)]
     {
         let version = version.to_owned();
@@ -171,10 +174,16 @@ pub fn start_background_check(version: &str) {
                 if let Some(dir) = update_dir() {
                     match check_and_stage(&version, &dir) {
                         Ok(Some(new_version)) => {
-                            log_error(&dir, &format!("staged update {new_version}"));
+                            let message =
+                                format!("更新を準備しました: v{new_version}（次回起動で適用）");
+                            publish(&notice, message.clone());
+                            log_error(&dir, &message);
                         }
                         Ok(None) => {}
-                        Err(error) => log_error(&dir, &error),
+                        Err(error) => {
+                            publish(&notice, format!("更新に失敗しました: {error}"));
+                            log_error(&dir, &error);
+                        }
                     }
                 }
             })
@@ -185,8 +194,13 @@ pub fn start_background_check(version: &str) {
     }
     #[cfg(not(windows))]
     {
-        let _ = version;
+        let _ = (version, notice);
     }
+}
+#[cfg(windows)]
+fn publish(notice: &Arc<Mutex<Option<String>>>, message: String) {
+    let mut slot = notice.lock().unwrap_or_else(|error| error.into_inner());
+    *slot = Some(message);
 }
 
 /// One-shot check used by the installer: no window, no waiting on the UI.
@@ -583,7 +597,12 @@ mod tests {
         let hash = sha256_file(&pending).unwrap();
         fs::write(dir.join(PENDING_HASH), hash.as_bytes()).unwrap();
         fs::write(dir.join(PENDING_VERSION), "9.9.9").unwrap();
-        assert!(apply_pending_in(&current, &dir, "0.1.10").unwrap());
+        assert_eq!(
+            apply_pending_in(&current, &dir, "0.1.10")
+                .unwrap()
+                .as_deref(),
+            Some("9.9.9")
+        );
         assert_eq!(fs::read(&current).unwrap(), b"new");
         assert!(!pending.exists());
         assert!(!dir.join(PENDING_HASH).exists());
@@ -668,7 +687,9 @@ mod tests {
         let current = dir.join("app.exe");
         fs::write(current.with_file_name("app.exe.old"), b"old").unwrap();
         assert!(!current.exists());
-        assert!(!apply_pending_in(&current, &dir, "0.1.10").unwrap());
+        assert!(apply_pending_in(&current, &dir, "0.1.10")
+            .unwrap()
+            .is_none());
         assert_eq!(fs::read(&current).unwrap(), b"old");
         assert!(!current.with_file_name("app.exe.old").exists());
         fs::remove_dir_all(dir).unwrap();
@@ -682,7 +703,12 @@ mod tests {
         let current = dir.join("app.exe");
         fs::write(current.with_file_name("app.exe.old"), b"old").unwrap();
         write_staged(&dir, b"new", "9.9.9");
-        assert!(apply_pending_in(&current, &dir, "0.1.10").unwrap());
+        assert_eq!(
+            apply_pending_in(&current, &dir, "0.1.10")
+                .unwrap()
+                .as_deref(),
+            Some("9.9.9")
+        );
         assert_eq!(fs::read(&current).unwrap(), b"new");
         fs::remove_dir_all(dir).unwrap();
     }

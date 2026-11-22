@@ -85,11 +85,12 @@ launch the staged exe replaces the running one before the window opens; a
 crash between the two renames is repaired on the next launch by restoring the
 backup before retrying. Corrupt staged files are discarded. The viewer
 deliberately does not restart itself, so no running session is ever interrupted.
+When an update is staged, applied or fails, the status line shows the outcome
+for ten seconds instead of leaving it completely silent.
 
 The check uses the Windows-supplied `curl.exe`, so no extra runtime is needed,
 and is throttled to once per 24 hours after a successful check. Clear the
-自動更新 checkbox in 設定, or pass `--no-update`, to skip it. Network failures
-are ignored and the last error is
+自動更新 checkbox in 設定, or pass `--no-update`, to skip it. Details are
 written to `%APPDATA%\image-viewer\update\update.log`. Replacing the exe
 requires write access to the directory that contains it; a portable copy in a
 read-only folder stays on its current version.

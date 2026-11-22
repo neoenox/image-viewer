@@ -1,6 +1,7 @@
 use crate::{assoc, files::*, imaging::*, loader::ImageLoader};
 use eframe::egui;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 /// Compact ASCII controls, all representable in Shift-JIS.
 /// Japanese tooltips describe each action without relying on symbol fonts.
@@ -118,6 +119,8 @@ pub struct ViewerApp {
     /// ステータスが変わってから自動消去までの時刻と、表示中の文字列。
     status_at: Option<Instant>,
     status_seen: String,
+    /// Status lifetime; update notices stay visible longer than normal messages.
+    status_ttl: Duration,
     /// 現在ファイルの mtime と、最後に読んだ時刻（更新検知の間引き用）。
     current_mtime: Option<std::time::SystemTime>,
     last_mtime_check: Option<Instant>,
@@ -128,6 +131,8 @@ pub struct ViewerApp {
     pub(crate) thumb_panel_open: bool,
     /// Widget id of the slideshow interval slider (keyboard focus guard).
     pub(crate) interval_slider_id: Option<egui::Id>,
+    /// Outcomes published by the background updater (staged / failed).
+    pub(crate) update_notice: Arc<Mutex<Option<String>>>,
     pub(crate) pan_offset: egui::Vec2,
     pub(crate) wheel_accum: f32,
     pub(crate) view_avail: egui::Vec2,
@@ -217,10 +222,12 @@ impl ViewerApp {
             status_msg: String::new(),
             status_at: None,
             status_seen: String::new(),
+            status_ttl: STATUS_TTL,
             failed_at: None,
             pending_thumb_scroll: None,
             thumb_panel_open: false,
             interval_slider_id: None,
+            update_notice: Arc::new(Mutex::new(None)),
             current_mtime: None,
             last_mtime_check: None,
             pan_offset: egui::Vec2::ZERO,
@@ -346,6 +353,7 @@ impl ViewerApp {
         self.failed_at = None;
         self.status_at = None;
         self.status_seen.clear();
+        self.status_ttl = STATUS_TTL;
         self.load_error = None;
         self.texture = None;
         self.base = None;
@@ -435,7 +443,7 @@ impl ViewerApp {
         }
         if self
             .status_at
-            .is_some_and(|at| now.duration_since(at) >= STATUS_TTL)
+            .is_some_and(|at| now.duration_since(at) >= self.status_ttl)
         {
             self.status_msg.clear();
             self.status_seen.clear();
@@ -444,8 +452,22 @@ impl ViewerApp {
         false
     }
 
+    /// Show an update outcome in the toolbar status line for a longer interval.
+    pub(crate) fn show_update_message(&mut self, message: String) {
+        self.status_msg = message;
+        self.status_ttl = Duration::from_secs(10);
+    }
+
     /// Apply completed worker results only for the current selection.
     pub fn poll_loading(&mut self, ctx: &egui::Context) {
+        let notice = self
+            .update_notice
+            .lock()
+            .ok()
+            .and_then(|mut slot| slot.take());
+        if let Some(message) = notice {
+            self.show_update_message(message);
+        }
         if let Some((generation, result)) = self.loader.poll() {
             if generation == self.generation {
                 self.loading = false;
@@ -1140,11 +1162,18 @@ fn no_update_requested<I: IntoIterator<Item = std::ffi::OsString>>(args: I) -> b
 
 pub fn run() -> eframe::Result<()> {
     // 前回ステージ済みの更新を、ウィンドウを作る前にサイレント適用する。
-    crate::update::apply_pending();
+    let applied = crate::update::apply_pending();
+    let notice = Arc::new(Mutex::new(None));
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     let no_update = no_update_requested(args.iter().cloned());
     let (initial, stats) = parse_launch_args(args);
     let mut app = ViewerApp::new(initial);
+    app.update_notice = notice.clone();
+    match applied {
+        Ok(Some(version)) => app.show_update_message(format!("更新を適用しました: v{version}")),
+        Ok(None) => {}
+        Err(error) => app.show_update_message(format!("更新の適用に失敗しました: {error}")),
+    }
     // F12 と同じオーバーレイを起動時から出す（ショートカット起動用）。
     app.show_stats = stats;
     app.settings_path = crate::settings::ViewerSettings::default_path();
@@ -1152,7 +1181,7 @@ pub fn run() -> eframe::Result<()> {
         app.settings = crate::settings::ViewerSettings::load(path);
     }
     if app.settings.auto_update && !no_update {
-        crate::update::start_background_check(env!("CARGO_PKG_VERSION"));
+        crate::update::start_background_check_with_notice(env!("CARGO_PKG_VERSION"), notice);
     }
     // 前回のウィンドウ状態（サイズ・位置・最大化）で開く。
     // 復元OFF・初回・不正値は既定ジオメトリ（詳細は window_state を参照）。
@@ -2008,6 +2037,31 @@ mod tests {
         );
         app.tick_status(base + Duration::from_secs(9));
         assert!(app.status_msg.is_empty());
+    }
+
+    #[test]
+    fn update_messages_stay_visible_for_ten_seconds() {
+        let mut app = ViewerApp::new(None);
+        let base = Instant::now();
+        app.show_update_message("更新を適用しました: v9.9.9".into());
+        assert!(app.tick_status(base));
+        app.tick_status(base + Duration::from_secs(8));
+        assert_eq!(app.status_msg, "更新を適用しました: v9.9.9");
+        app.tick_status(base + Duration::from_secs(10));
+        assert!(app.status_msg.is_empty());
+    }
+
+    #[test]
+    fn staged_and_failed_update_notices_reach_the_status_line() {
+        let ctx = egui::Context::default();
+        let mut app = ViewerApp::new(None);
+        *app.update_notice.lock().unwrap() = Some("更新を準備しました: v9.9.9".into());
+        app.poll_loading(&ctx);
+        assert!(app.status_msg.contains("更新を準備しました"));
+        app.status_msg.clear();
+        *app.update_notice.lock().unwrap() = Some("更新に失敗しました: 接続できません".into());
+        app.poll_loading(&ctx);
+        assert!(app.status_msg.contains("更新に失敗しました"));
     }
 
     #[test]
