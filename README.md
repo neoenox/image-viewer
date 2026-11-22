@@ -35,7 +35,7 @@ cargo llvm-cov --locked --all-targets --summary-only --fail-under-lines 85
 
 The CI `coverage` job runs exactly that and uploads the `lcov` report as the
 `coverage` artifact. The 85% floor is a floor, not a target: the last recorded
-Windows measurement was **87.39%** of 6961 lines (878 uncovered), leaving about
+Windows measurement was **87.27%** of 7023 lines (894 uncovered), leaving about
 two points of slack for runner variation while still failing a change that adds
 a few hundred uncovered lines. The uploaded report is authoritative for later
 changes. Raise the floor as coverage improves; do not lower it to make a red run
