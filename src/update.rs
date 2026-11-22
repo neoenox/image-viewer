@@ -164,6 +164,11 @@ fn record_check(dir: &Path) {
 }
 
 pub fn start_background_check(version: &str) {
+    start_background_check_with_notice(version, Arc::new(Mutex::new(None)));
+}
+
+/// Same check, but publishes the outcome to the UI status line.
+pub fn start_background_check_with_notice(version: &str, notice: Arc<Mutex<Option<String>>>) {
     #[cfg(windows)]
     {
         let version = version.to_owned();
@@ -173,7 +178,10 @@ pub fn start_background_check(version: &str) {
                 if let Some(dir) = update_dir() {
                     match check_and_stage(&version, &dir) {
                         Ok(Some(new_version)) => {
-                            log_error(&dir, &format!("staged update {new_version}"));
+                            let message =
+                                format!("更新を準備しました: v{new_version}（次回起動で適用）");
+                            publish(&notice, message.clone());
+                            log_error(&dir, &message);
                         }
                         Ok(None) => {}
                         Err(error) => {
