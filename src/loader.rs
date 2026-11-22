@@ -18,7 +18,7 @@ enum Role {
     Any,
 }
 /// Failed loads are retried after this long (e.g. a file still being written).
-const FAILED_RETRY: Duration = Duration::from_secs(5);
+pub(crate) const FAILED_RETRY: Duration = Duration::from_secs(5);
 
 // Holds the five-image keep window (current ±2) at the 2048px cap (16MB each).
 pub(crate) const CACHE_BUDGET: usize = 80 * 1024 * 1024;
@@ -124,6 +124,8 @@ impl State {
             .is_some_and(|at| at.elapsed() < FAILED_RETRY)
     }
     fn insert(&mut self, key: Key, value: CachedImage) {
+        // A successful decode supersedes any earlier failure marker.
+        self.failed.remove(&key);
         let bytes = value.rgba.as_raw().len();
         if bytes > CACHE_BUDGET {
             return;
@@ -295,6 +297,9 @@ impl ImageLoader {
         let (lock, wake) = &*self.shared;
         let mut state = lock.lock_recover();
         state.generation = generation;
+        // A queued preload for this selection must not be decoded a second time.
+        let key = (path.clone(), cap);
+        state.preloads.retain(|k| k != &key);
         if state.detail_src.as_ref().is_some_and(|s| s.path != path) {
             state.detail_src = None;
         }
@@ -327,6 +332,12 @@ impl ImageLoader {
             .lock_recover()
             .cache
             .contains_key(&(path.to_owned(), cap))
+    }
+
+    /// Whether a thumbnail decode is queued or still running.
+    pub(crate) fn has_pending(&self) -> bool {
+        let state = self.shared.0.lock_recover();
+        !state.preloads.is_empty() || !state.active.is_empty() || state.result.is_some()
     }
     /// Bytes currently retained for cached thumbnails plus the single detail
     /// source. Lets tests assert the detail path keeps at most one source
@@ -516,6 +527,32 @@ mod tests {
             1,
             "workers outlived the loader drop"
         );
+    }
+
+    #[test]
+    fn select_drops_queued_preload_for_same_key() {
+        let loader = ImageLoader::with_workers(&[]);
+        let path = PathBuf::from("a.png");
+        loader.request(path.clone(), 128);
+        assert_eq!(loader.shared.0.lock_recover().preloads.len(), 1);
+        loader.select(1, path.clone(), 128);
+        assert!(loader.shared.0.lock_recover().preloads.is_empty());
+    }
+
+    #[test]
+    fn successful_insert_clears_failure_marker() {
+        let mut state = State::default();
+        let key = (PathBuf::from("a.png"), 128);
+        state.failed.insert(key.clone(), Instant::now());
+        state.insert(
+            key.clone(),
+            CachedImage {
+                rgba: Arc::new(image::RgbaImage::new(2, 2)),
+                orig: (2, 2),
+                gif: false,
+            },
+        );
+        assert!(!state.is_failed(&key));
     }
     #[test]
     fn join_within_deadline_detaches_a_worker_stuck_past_the_deadline() {

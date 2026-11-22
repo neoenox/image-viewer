@@ -34,12 +34,30 @@ cargo llvm-cov --locked --all-targets --summary-only --fail-under-lines 85
 ```
 
 The CI `coverage` job runs exactly that and uploads the `lcov` report as the
-`coverage` artifact. The 85% floor is a floor, not a target: the measured total is
-**88.8%** of 6177 lines, so nearly four points of slack absorb runner variation while
-any change adding a few hundred uncovered lines still fails. Raise the floor as
-coverage improves; do not lower it to make a red run green. Ignored benchmark
-tests do not run by default and are therefore not counted, and code behind
-`#[cfg(not(windows))]` is not compiled on the measuring platform.
+`coverage` artifact. The 85% floor is a floor, not a target: the last recorded
+Windows measurement was **87.3%** of 6123 lines (778 uncovered), leaving about
+two points of slack for runner variation while still failing a change that adds
+a few hundred uncovered lines. The uploaded report is authoritative for later
+changes. Raise the floor as coverage improves; do not lower it to make a red run
+green. Ignored benchmark tests do not run by default and are therefore not
+counted, and code behind `#[cfg(not(windows))]` is not compiled on the
+measuring platform.
+
+## Installing
+
+There is no MSI installer; `scripts/install.ps1` performs a per-user install
+(no admin required):
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\install.ps1 `
+  -ExePath target\release\image-viewer.exe
+```
+
+It copies the exe to `%LOCALAPPDATA%\Programs\ImageViewer`, creates a Start
+Menu shortcut, registers the file associations and adds an uninstall entry.
+The installer also runs `image-viewer.exe --check-update`, so a newer release
+is verified and staged silently during installation and applied at the next
+launch. Use `scripts\uninstall.ps1` to reverse it.
 
 ## Releasing
 
@@ -56,6 +74,25 @@ Release notes are generated from merged PRs and grouped by label
 (`enhancement`, `bug`, `documentation`; anything else goes under "その他"), as set in
 `.github/release.yml`. Bump `version` in `Cargo.toml` before tagging; it is embedded
 in the exe's file properties.
+
+## Automatic updates
+
+On startup the viewer quietly checks the latest GitHub release for a newer
+Windows exe. It reads `SHA256SUMS.txt` over HTTPS, downloads the matching exe,
+verifies its SHA-256 and stages it under `%APPDATA%\image-viewer\update`. No
+dialog is shown. At the next
+launch the staged exe replaces the running one before the window opens; a
+crash between the two renames is repaired on the next launch by restoring the
+backup before retrying. Corrupt staged files are discarded. The viewer
+deliberately does not restart itself, so no running session is ever interrupted.
+
+The check uses the Windows-supplied `curl.exe`, so no extra runtime is needed,
+and is throttled to once per 24 hours after a successful check. Clear the
+自動更新 checkbox in 設定, or pass `--no-update`, to skip it. Network failures
+are ignored and the last error is
+written to `%APPDATA%\image-viewer\update\update.log`. Replacing the exe
+requires write access to the directory that contains it; a portable copy in a
+read-only folder stays on its current version.
 
 ## Viewing
 
@@ -86,9 +123,10 @@ or a slow region decode (up to three full-size decodes can be in memory at once)
 Rapid navigation replaces pending selection work and rejects obsolete results.
 The main preview cache is limited to 80 MiB (room for the current image and two
 neighbours on each side at the 2048 pixel cap) and evicts the least recently used
-image first; thumbnails have a separate cache with the same ceiling, only retain
-visible rows, and are decoded by three workers in parallel (so up to three full-size
-decodes can be in memory at once while the list fills). A failed load is retried after 5 seconds, so a file that was still
+image first; thumbnails have a separate cache with the same ceiling, retain visible rows
+plus a small LRU of recently seen rows (up to 64), and are decoded by three workers in
+parallel (so up to three full-size decodes can be in memory at once while the list fills).
+A failed load is retried after 5 seconds, so a file that was still
 being written does not stay marked as broken. Preview resolution is capped
 at 2048 pixels, with visible original-resolution regions loaded on demand.
 GIF playback uses a two-frame queue and one displayed texture, with frames capped
@@ -160,6 +198,7 @@ blocker.
 - `sync.rs`: lock helpers that survive a poisoned mutex; panic-safe worker decoding.
 - `win_icon.rs`: window/taskbar icon applied via Win32 (keeps eframe's icon code out of the exe).
 - `assoc.rs`: Windows file association registration and restoration.
+- `update.rs`: silent, checksum-verified release check, staging and next-launch exe swap.
 
 The implementation plan and acceptance criteria are in
 [docs/responsive-viewer-plan.md](docs/responsive-viewer-plan.md).

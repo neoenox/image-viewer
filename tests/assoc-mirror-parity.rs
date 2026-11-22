@@ -134,33 +134,33 @@ fn windows_only_deps_are_target_gated() {
         !top_deps.contains("raw-window-handle"),
         "raw-window-handle must not be unconditional"
     );
-    // `winresource` must live under target build-dependencies.
-    let windows_build = section(&text, "[target.'cfg(windows)'.build-dependencies]");
+    // Build scripts run on the host: a host-gated build-dependency would be
+    // missing when cross-compiling to Windows, so winresource is unconditional
+    // and the script checks CARGO_CFG_TARGET_OS instead.
+    let build_deps = section(&text, "[build-dependencies]");
     assert!(
-        windows_build.contains("winresource"),
-        "winresource must be Windows-only build-dep"
+        build_deps.contains("winresource"),
+        "winresource must be available to the build script on any host"
     );
-    if let Some(top_build) = try_section(&text, "[build-dependencies]") {
-        assert!(
-            !top_build.contains("winresource"),
-            "winresource must not be unconditional build-dep"
-        );
-    }
+    assert!(
+        try_section(&text, "[target.'cfg(windows)'.build-dependencies]").is_none(),
+        "host-gated build-deps break cross-compilation to Windows"
+    );
 }
 
 #[test]
 fn build_script_embeds_resources_on_windows_only() {
     let build_rs = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("build.rs");
     let text = std::fs::read_to_string(&build_rs).expect("read build.rs");
-    // Resource embedding must be cfg-gated so non-Windows builds never need
-    // `winresource` (issue #35).
+    // Host `cfg(windows)` would be false when cross-compiling; the target OS
+    // arrives through Cargo's environment.
     assert!(
-        text.contains("#[cfg(windows)]"),
-        "build.rs must gate Windows resource embedding"
+        text.contains("CARGO_CFG_TARGET_OS"),
+        "build.rs must gate resource embedding on the target OS"
     );
     assert!(
-        text.contains("#[cfg(not(windows))]"),
-        "build.rs must provide a non-Windows no-op main"
+        !text.contains("#[cfg(windows)]"),
+        "build.rs must not gate on the host platform"
     );
     assert!(
         text.contains("winresource"),

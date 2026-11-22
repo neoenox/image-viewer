@@ -50,6 +50,12 @@ impl ViewerApp {
         if self.show_settings || self.show_assoc || ctx.wants_keyboard_input() {
             return;
         }
+        // The interval slider consumes arrow/Space itself; don't also navigate.
+        if let Some(id) = self.interval_slider_id {
+            if ctx.memory(|m| m.focused()) == Some(id) {
+                return;
+            }
+        }
         if ctx.input(|i| i.key_pressed(egui::Key::Tab)) {
             self.toolbar_pinned = !self.toolbar_pinned;
         }
@@ -158,7 +164,7 @@ impl ViewerApp {
             self.wheel_accum = 0.0;
             return;
         }
-        if ctx.input(|i| i.pointer.middle_down()) {
+        if self.settings.hold_to_peek && ctx.input(|i| i.pointer.middle_down()) {
             self.wheel_accum = 0.0;
             return;
         }

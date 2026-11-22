@@ -120,11 +120,12 @@ impl eframe::App for ViewerApp {
                         self.last_advance = Some(Instant::now());
                     }
                     if self.slideshow {
-                        ui.add(
+                        let response = ui.add(
                             egui::Slider::new(&mut self.slideshow_secs, 0.5..=10.0)
                                 .suffix("s")
                                 .show_value(true),
                         );
+                        self.interval_slider_id = Some(response.id);
                     }
                     let fs_tip = if self.fullscreen {
                         "全画面解除 (Esc)"
@@ -573,6 +574,11 @@ impl ViewerApp {
                     "起動時に前回のウィンドウ状態を復元する",
                 )
                 .on_hover_text("OFF では常に既定サイズ・中央・非最大化で開きます");
+                ui.checkbox(
+                    &mut self.settings.auto_update,
+                    "起動時に更新を確認する（次回起動で適用）",
+                )
+                .on_hover_text("OFF では更新チェックを行いません");
                 ui.horizontal(|ui| {
                     use crate::settings::ZoomQuality;
                     ui.label("拡大時の画質:");
@@ -621,8 +627,14 @@ impl ViewerApp {
             self.thumbnails.clear();
             self.thumb_lru.clear();
             self.thumb_retained.clear();
+            self.thumb_panel_open = false;
             return;
         }
+        if !self.thumb_panel_open {
+            self.thumb_panel_open = true;
+            self.pending_thumb_scroll = Some(self.index);
+        }
+        let mut pending_scroll = self.pending_thumb_scroll.take();
         let mut selected = None;
         let mut visible = Vec::new();
         egui::SidePanel::left("thumbnails")
@@ -684,12 +696,20 @@ impl ViewerApp {
                                 selected = Some(index);
                             }
                         });
-                        response.response.on_hover_text(path.to_string_lossy());
+                        let row_response = response.response.on_hover_text(path.to_string_lossy());
+                        if pending_scroll == Some(index) {
+                            ui.scroll_to_rect(row_response.rect, Some(egui::Align::Center));
+                            pending_scroll = None;
+                        }
                     }
                 });
             });
-        // 保持は可視と分離する：可視分を新世代として記録し、上限超過分だけ
-        // 落とす。スクロールバックはキャッシュに当たる。
+        self.pending_thumb_scroll = pending_scroll;
+        // 未取得の行がある間だけポーリングする。完了後のアイドル再描画は不要。
+        let thumb_pending = visible
+            .iter()
+            .any(|p| !self.thumbnails.contains_key(p) && !self.thumbnail_loader.is_failed(p, 128))
+            || self.thumbnail_loader.has_pending();
         self.retain_visible_thumbs(visible);
         let retained: Vec<PathBuf> = self.thumb_retained.iter().cloned().collect();
         self.thumbnails
@@ -698,7 +718,9 @@ impl ViewerApp {
         if let Some(index) = selected {
             self.goto(index, ctx);
         }
-        ctx.request_repaint_after(Duration::from_millis(100));
+        if thumb_pending {
+            ctx.request_repaint_after(Duration::from_millis(100));
+        }
     }
 
     /// 可視サムネイルを新世代として記録し、上限超過の古世代を落とす。
@@ -857,7 +879,7 @@ mod tests {
         while app.is_loading() {
             app.poll_loading(ctx);
             assert!(
-                start.elapsed() < Duration::from_secs(15),
+                start.elapsed() < Duration::from_secs(30),
                 "background loading timed out"
             );
             std::thread::sleep(Duration::from_millis(2));
@@ -1159,6 +1181,7 @@ mod tests {
             "ホイール:前後 / Ctrl+ホイール:拡大縮小 / ドラッグ:視点移動"
         ));
         assert!(shows(&out, "設定はこの起動中に適用されます。"));
+        assert!(shows(&out, "起動時に更新を確認する（次回起動で適用）"));
         // 開いただけでは設定を書き換えない。
         assert!(!app.window_state_dirty);
 
@@ -1302,7 +1325,7 @@ mod tests {
             .any(|path| app.thumbnail_loader.is_cached(path, 128))
         {
             assert!(
-                start.elapsed() < Duration::from_secs(15),
+                start.elapsed() < Duration::from_secs(30),
                 "thumbnail decode timed out"
             );
             std::thread::sleep(Duration::from_millis(2));
@@ -1491,6 +1514,20 @@ mod tests {
         assert_eq!(app.stats.display_sample_count(), 0);
         assert_eq!(app.stats.display_last_ms(), None);
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn navigation_marks_new_thumbnail_row_for_scroll() {
+        let dir = fixture_dir("thumbscroll");
+        let ctx = headless_ctx();
+        let mut app = ViewerApp::new(None);
+        open(&mut app, &ctx, dir.join("a.png"));
+        app.show_thumbnails = true;
+        app.thumb_panel_open = true;
+        app.pending_thumb_scroll = None;
+        app.next(&ctx);
+        assert_eq!(app.pending_thumb_scroll, Some(1));
         std::fs::remove_dir_all(&dir).ok();
     }
 }

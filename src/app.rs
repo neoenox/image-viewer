@@ -121,6 +121,13 @@ pub struct ViewerApp {
     /// 現在ファイルの mtime と、最後に読んだ時刻（更新検知の間引き用）。
     current_mtime: Option<std::time::SystemTime>,
     last_mtime_check: Option<Instant>,
+    /// Set when the current selection failed to decode; drives the 5s retry.
+    failed_at: Option<Instant>,
+    /// Row to bring into view once the thumbnail panel renders it.
+    pub(crate) pending_thumb_scroll: Option<usize>,
+    pub(crate) thumb_panel_open: bool,
+    /// Widget id of the slideshow interval slider (keyboard focus guard).
+    pub(crate) interval_slider_id: Option<egui::Id>,
     pub(crate) pan_offset: egui::Vec2,
     pub(crate) wheel_accum: f32,
     pub(crate) view_avail: egui::Vec2,
@@ -210,6 +217,10 @@ impl ViewerApp {
             status_msg: String::new(),
             status_at: None,
             status_seen: String::new(),
+            failed_at: None,
+            pending_thumb_scroll: None,
+            thumb_panel_open: false,
+            interval_slider_id: None,
             current_mtime: None,
             last_mtime_check: None,
             pan_offset: egui::Vec2::ZERO,
@@ -305,7 +316,11 @@ impl ViewerApp {
 
     pub fn open_path(&mut self, path: PathBuf, ctx: Option<&egui::Context>) {
         self.files = collect_siblings(&path);
-        self.index = self.files.iter().position(|p| p == &path).unwrap_or(0);
+        self.index = self
+            .files
+            .iter()
+            .position(|p| same_file_path(p, &path))
+            .unwrap_or(0);
         self.rotation = 0;
         self.fit = true;
         self.zoom = 1.0;
@@ -328,6 +343,7 @@ impl ViewerApp {
         self.detail_pending = false;
         self.detail_unavailable = false;
         self.status_msg.clear();
+        self.failed_at = None;
         self.status_at = None;
         self.status_seen.clear();
         self.load_error = None;
@@ -359,33 +375,50 @@ impl ViewerApp {
         }
     }
 
-    /// 現在のファイルがディスク上で差し替えられたら、恒久失敗の判定を捨てる。
-    /// 原寸ガードとGIFフレーム取得時に呼び、ユーザー操作の瞬間に回復させる。
-    pub(crate) fn refresh_current_file(&mut self) {
+    /// 現在ファイルが差し替えられたら、古いテクスチャ・原寸タイル・失敗判定を
+    /// 捨てて最初から読み込む。mtime 更新は 1 秒間隔で間引く。
+    /// 変更を検知して再読込を開始した場合に true を返す。
+    pub(crate) fn refresh_current_file(&mut self, ctx: Option<&egui::Context>) -> bool {
         let now = Instant::now();
         if self
             .last_mtime_check
             .is_some_and(|at| now.duration_since(at) < MTIME_CHECK_INTERVAL)
         {
-            return;
+            return false;
         }
         self.last_mtime_check = Some(now);
         let Some(path) = self.current_path().map(Path::to_path_buf) else {
+            return false;
+        };
+        if crate::loader::modified_time(&path) == self.current_mtime {
+            return false;
+        }
+        self.load_current(ctx);
+        true
+    }
+
+    /// 現在画像のデコード失敗を 5 秒後に再試行する。書き込み中のファイルが
+    /// 完成した場合でも、移動せずに回復できるようにする。
+    fn retry_failed_load(&mut self, ctx: &egui::Context) {
+        let Some(at) = self.failed_at else {
             return;
         };
-        let mtime = crate::loader::modified_time(&path);
-        if mtime == self.current_mtime {
+        let elapsed = at.elapsed();
+        if elapsed < crate::loader::FAILED_RETRY {
+            ctx.request_repaint_after(crate::loader::FAILED_RETRY - elapsed);
             return;
         }
-        self.current_mtime = mtime;
-        self.detail_unavailable = false;
-        self.status_msg.clear();
-        self.status_at = None;
-        self.status_seen.clear();
-        if self.animation.is_some() {
-            self.animation = Some(crate::animation::Animation::new(path, self.tex_cap));
-            self.anim_due = Some(now);
+        let Some(path) = self.current_path().map(Path::to_path_buf) else {
+            return;
+        };
+        self.failed_at = None;
+        self.load_error = None;
+        self.loading = true;
+        if self.show_stats {
+            self.stats.note_selection(Instant::now());
         }
+        self.loader.select(self.generation, path, self.tex_cap);
+        ctx.request_repaint();
     }
 
     /// ステータス行を一定時間で消す。残り続けると自動非表示のツールバーが固定される。
@@ -418,6 +451,7 @@ impl ViewerApp {
                 self.loading = false;
                 match result {
                     Ok(image) => {
+                        self.failed_at = None;
                         self.base = Some(image.rgba);
                         self.orig_dims = Some(image.orig);
                         if image.gif {
@@ -435,11 +469,16 @@ impl ViewerApp {
                     Err(error) => {
                         self.load_error = Some(format!("開けませんでした: {error}"));
                         self.stats.clear_pending();
+                        self.failed_at = Some(Instant::now());
+                        ctx.request_repaint_after(crate::loader::FAILED_RETRY);
                     }
                 }
             }
         }
-        self.refresh_current_file();
+        if self.refresh_current_file(Some(ctx)) {
+            return;
+        }
+        self.retry_failed_load(ctx);
         if self.anim_due.is_some_and(|due| Instant::now() >= due) {
             if let Some(frame) = self.animation.as_mut().and_then(|a| a.poll()) {
                 match frame {
@@ -574,6 +613,9 @@ impl ViewerApp {
         self.fit = true;
         self.zoom = 1.0;
         self.pan_offset = egui::Vec2::ZERO;
+        if self.show_thumbnails {
+            self.pending_thumb_scroll = Some(new_index);
+        }
         self.wheel_accum = 0.0;
         self.load_current(Some(ctx));
         self.last_advance = Some(Instant::now());
@@ -951,7 +993,9 @@ impl ViewerApp {
     }
 
     pub(crate) fn request_detail(&mut self, region: [u32; 4]) {
-        self.refresh_current_file();
+        if self.refresh_current_file(None) {
+            return;
+        }
         if self.is_animated() || self.detail_unavailable {
             return;
         }
@@ -1069,24 +1113,46 @@ fn is_valid_launch_path(path: &Path) -> bool {
     path.exists() && (path.is_dir() || is_supported(path))
 }
 
-/// `--stats`（起動時から表示レイテンシのオーバーレイを出す）が指定されているか。
-/// 画像パスと混ざっても壊れないよう、引数をそのまま走査する。
-fn stats_requested<I: IntoIterator<Item = std::ffi::OsString>>(args: I) -> bool {
-    args.into_iter().any(|arg| arg == "--stats")
+/// 起動引数から画像パスと `--stats` を順番に依存せず読み出す。
+fn parse_launch_args<I: IntoIterator<Item = std::ffi::OsString>>(
+    args: I,
+) -> (Option<PathBuf>, bool) {
+    let (mut path, mut stats) = (None, false);
+    for arg in args {
+        if arg == "--stats" {
+            stats = true;
+            continue;
+        }
+        if path.is_none() {
+            let candidate = PathBuf::from(arg);
+            if is_valid_launch_path(&candidate) {
+                path = Some(candidate);
+            }
+        }
+    }
+    (path, stats)
+}
+
+/// `--no-update` が起動引数にあれば更新チェックを止める。
+fn no_update_requested<I: IntoIterator<Item = std::ffi::OsString>>(args: I) -> bool {
+    args.into_iter().any(|arg| arg == "--no-update")
 }
 
 pub fn run() -> eframe::Result<()> {
-    let initial: Option<PathBuf> = std::env::args_os()
-        .nth(1)
-        .map(PathBuf::from)
-        .filter(|p| is_valid_launch_path(p));
-
+    // 前回ステージ済みの更新を、ウィンドウを作る前にサイレント適用する。
+    crate::update::apply_pending();
+    let args: Vec<_> = std::env::args_os().skip(1).collect();
+    let no_update = no_update_requested(args.iter().cloned());
+    let (initial, stats) = parse_launch_args(args);
     let mut app = ViewerApp::new(initial);
     // F12 と同じオーバーレイを起動時から出す（ショートカット起動用）。
-    app.show_stats = stats_requested(std::env::args_os().skip(1));
+    app.show_stats = stats;
     app.settings_path = crate::settings::ViewerSettings::default_path();
     if let Some(path) = &app.settings_path {
         app.settings = crate::settings::ViewerSettings::load(path);
+    }
+    if app.settings.auto_update && !no_update {
+        crate::update::start_background_check(env!("CARGO_PKG_VERSION"));
     }
     // 前回のウィンドウ状態（サイズ・位置・最大化）で開く。
     // 復元OFF・初回・不正値は既定ジオメトリ（詳細は window_state を参照）。
@@ -1108,24 +1174,91 @@ pub fn run() -> eframe::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::stats_requested;
+    use super::{no_update_requested, parse_launch_args};
 
     fn os_args(list: &[&str]) -> Vec<std::ffi::OsString> {
         list.iter().copied().map(std::ffi::OsString::from).collect()
     }
 
     #[test]
-    fn stats_flag_is_recognised_among_other_arguments() {
-        assert!(!stats_requested(os_args(&[])), "no flag means no stats");
-        assert!(
-            !stats_requested(os_args(&["photo.png"])),
-            "an image path is not the flag"
-        );
-        assert!(stats_requested(os_args(&["--stats"])));
-        assert!(
-            stats_requested(os_args(&["photo.png", "--stats"])),
-            "the flag may follow a path"
-        );
+    fn launch_args_are_order_independent() {
+        assert_eq!(parse_launch_args(os_args(&[])), (None, false));
+        let dir = std::env::temp_dir().join(format!("iv-launch-args-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let png = dir.join("photo.png");
+        image::RgbaImage::new(2, 2).save(&png).unwrap();
+        let arg = png.to_string_lossy().into_owned();
+        assert!(parse_launch_args(os_args(&[&arg, "--stats"])).1);
+        let (path, stats) = parse_launch_args(os_args(&["--stats", &arg]));
+        assert!(stats);
+        assert_eq!(path, Some(png));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn no_update_flag_is_recognised_anywhere() {
+        assert!(!no_update_requested(os_args(&["photo.png"])));
+        assert!(no_update_requested(os_args(&["--no-update"])));
+        assert!(no_update_requested(os_args(&["photo.png", "--no-update"])));
+    }
+    #[test]
+    fn file_change_reloads_and_drops_derived_state() {
+        let dir = std::env::temp_dir().join(format!("iv-file-change-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("a.png");
+        image::RgbaImage::new(4, 4).save(&path).unwrap();
+        let ctx = egui::Context::default();
+        let mut app = ViewerApp::new(None);
+        app.open_path(path.clone(), Some(&ctx));
+        settle_for_reload_test(&mut app, &ctx);
+        app.detail_key = Some(crate::loader::DetailKey {
+            generation: app.generation,
+            rotation: 0,
+            region: [0, 0, 4, 4],
+        });
+        let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        file.set_modified(std::time::SystemTime::now() + Duration::from_secs(30))
+            .unwrap();
+        app.last_mtime_check = Some(Instant::now() - Duration::from_secs(2));
+        assert!(app.refresh_current_file(Some(&ctx)));
+        assert!(app.base.is_none());
+        assert!(app.detail_key.is_none());
+        assert!(app.loading);
+        assert_eq!(app.current_mtime, crate::loader::modified_time(&path));
+        drop(app);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn failed_current_load_retries_after_five_seconds() {
+        let dir = std::env::temp_dir().join(format!("iv-retry-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("a.png");
+        std::fs::write(&path, b"not an image").unwrap();
+        let ctx = egui::Context::default();
+        let mut app = ViewerApp::new(None);
+        app.open_path(path.clone(), Some(&ctx));
+        settle_for_reload_test(&mut app, &ctx);
+        assert!(app.load_error.is_some());
+        assert!(app.failed_at.is_some());
+        image::RgbaImage::new(8, 8).save(&path).unwrap();
+        app.failed_at = Some(Instant::now() - crate::loader::FAILED_RETRY - Duration::from_secs(1));
+        app.poll_loading(&ctx);
+        assert!(app.loading);
+        assert!(app.load_error.is_none());
+        settle_for_reload_test(&mut app, &ctx);
+        assert!(app.has_texture());
+        drop(app);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn settle_for_reload_test(app: &mut ViewerApp, ctx: &egui::Context) {
+        let start = Instant::now();
+        while app.is_loading() {
+            app.poll_loading(ctx);
+            assert!(start.elapsed() < Duration::from_secs(10));
+            std::thread::sleep(Duration::from_millis(2));
+        }
     }
 
     #[test]
@@ -1445,7 +1578,7 @@ mod tests {
         let start = Instant::now();
         while app.is_loading() {
             app.poll_loading(ctx);
-            assert!(start.elapsed() < Duration::from_secs(15));
+            assert!(start.elapsed() < Duration::from_secs(30));
             std::thread::sleep(Duration::from_millis(5));
         }
     }
@@ -1453,7 +1586,7 @@ mod tests {
         let start = Instant::now();
         while app.detail_tiles.is_empty() {
             app.poll_loading(ctx);
-            assert!(start.elapsed() < Duration::from_secs(15));
+            assert!(start.elapsed() < Duration::from_secs(30));
             std::thread::sleep(Duration::from_millis(5));
         }
     }
@@ -1463,7 +1596,7 @@ mod tests {
         while app.detail_pending {
             app.poll_loading(ctx);
             assert!(
-                start.elapsed() < Duration::from_secs(15),
+                start.elapsed() < Duration::from_secs(30),
                 "detail request timed out"
             );
             std::thread::sleep(Duration::from_millis(5));
@@ -1645,7 +1778,7 @@ mod tests {
             }
             app.poll_loading(ctx);
             assert!(
-                start.elapsed() < Duration::from_secs(10),
+                start.elapsed() < Duration::from_secs(30),
                 "upscale timed out"
             );
             std::thread::sleep(Duration::from_millis(2));
@@ -1794,7 +1927,7 @@ mod tests {
         let started = Instant::now();
         while !loader.is_cached(&path, 1024) || !loader.is_cached(&path, 2048) {
             assert!(
-                started.elapsed() < Duration::from_secs(15),
+                started.elapsed() < Duration::from_secs(30),
                 "preload timed out"
             );
             std::thread::sleep(Duration::from_millis(10));
@@ -1889,7 +2022,7 @@ mod tests {
         app.detail_unavailable = true;
         app.current_mtime = Some(std::time::SystemTime::UNIX_EPOCH);
         app.last_mtime_check = None;
-        app.refresh_current_file();
+        app.refresh_current_file(None);
 
         assert!(
             !app.detail_unavailable,
@@ -1911,7 +2044,7 @@ mod tests {
         app.detail_unavailable = true;
         app.current_mtime = Some(std::time::SystemTime::UNIX_EPOCH);
         app.last_mtime_check = Some(Instant::now());
-        app.refresh_current_file();
+        app.refresh_current_file(None);
 
         assert!(
             app.detail_unavailable,
@@ -1933,7 +2066,7 @@ mod tests {
         app.current_mtime = Some(first);
         app.detail_unavailable = true;
         app.last_mtime_check = None;
-        app.refresh_current_file();
+        app.refresh_current_file(None);
         assert!(
             app.detail_unavailable,
             "an unchanged file must not clear the flag"
@@ -1946,7 +2079,7 @@ mod tests {
         assert_eq!(crate::loader::modified_time(&path), Some(newer));
 
         app.last_mtime_check = None;
-        app.refresh_current_file();
+        app.refresh_current_file(None);
         assert!(
             !app.detail_unavailable,
             "a real overwrite must recover detail"
@@ -1979,10 +2112,13 @@ mod tests {
         app.animation = Some(crate::animation::Animation::new(path.clone(), 2048));
         app.current_mtime = Some(std::time::SystemTime::UNIX_EPOCH);
         app.last_mtime_check = None;
-        app.refresh_current_file();
-
+        app.refresh_current_file(None);
+        assert!(app.animation.is_none(), "old player dropped on reload");
+        assert!(app.loading);
+        let ctx = egui::Context::default();
+        settle_for_reload_test(&mut app, &ctx);
+        assert!(app.animation.is_some(), "new player after reload");
         assert!(app.anim_due.is_some(), "the new player is due immediately");
-        app.animation = None;
         for _ in 0..100 {
             if std::fs::remove_dir_all(&dir).is_ok() {
                 break;

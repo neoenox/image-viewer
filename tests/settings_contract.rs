@@ -148,7 +148,7 @@ fn restore_opt_out_bridge_survives_save() {
     let path = dir.join("settings.txt");
     std::fs::write(
         &path,
-        "version=1\nwheel_navigation=false\nwindow_width=1280\nwindow_height=800\nwindow_x=100\nwindow_y=-20\nwindow_maximized=true\nrestore_window=false\nfuture_option=123\n",
+        "version=1\nwheel_navigation=false\nwindow_width=1280\nwindow_height=800\nwindow_x=100\nwindow_y=-20\nwindow_maximized=true\nrestore_window=false\nauto_update=false\nfuture_option=123\n",
     )
     .unwrap();
 
@@ -163,6 +163,7 @@ fn restore_opt_out_bridge_survives_save() {
         "window_y=-20\n",
         "window_maximized=true\n",
         "restore_window=false\n",
+        "auto_update=false\n",
         "future_option=123\n",
     ] {
         assert!(text.contains(line), "missing {line:?} in {text:?}");
