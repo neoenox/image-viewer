@@ -43,6 +43,22 @@ green. Ignored benchmark tests do not run by default and are therefore not
 counted, and code behind `#[cfg(not(windows))]` is not compiled on the
 measuring platform.
 
+## Installing
+
+There is no MSI installer; `scripts/install.ps1` performs a per-user install
+(no admin required):
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\install.ps1 `
+  -ExePath target\release\image-viewer.exe
+```
+
+It copies the exe to `%LOCALAPPDATA%\Programs\ImageViewer`, creates a Start
+Menu shortcut, registers the file associations and adds an uninstall entry.
+The installer also runs `image-viewer.exe --check-update`, so a newer release
+is verified and staged silently during installation and applied at the next
+launch. Use `scripts\uninstall.ps1` to reverse it.
+
 ## Releasing
 
 Pushing a `v*` tag runs `.github/workflows/release.yml`, which tests, builds, and

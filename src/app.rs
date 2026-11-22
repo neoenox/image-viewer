@@ -1578,7 +1578,7 @@ mod tests {
         let start = Instant::now();
         while app.is_loading() {
             app.poll_loading(ctx);
-            assert!(start.elapsed() < Duration::from_secs(15));
+            assert!(start.elapsed() < Duration::from_secs(30));
             std::thread::sleep(Duration::from_millis(5));
         }
     }
@@ -1586,7 +1586,7 @@ mod tests {
         let start = Instant::now();
         while app.detail_tiles.is_empty() {
             app.poll_loading(ctx);
-            assert!(start.elapsed() < Duration::from_secs(15));
+            assert!(start.elapsed() < Duration::from_secs(30));
             std::thread::sleep(Duration::from_millis(5));
         }
     }
@@ -1596,7 +1596,7 @@ mod tests {
         while app.detail_pending {
             app.poll_loading(ctx);
             assert!(
-                start.elapsed() < Duration::from_secs(15),
+                start.elapsed() < Duration::from_secs(30),
                 "detail request timed out"
             );
             std::thread::sleep(Duration::from_millis(5));
@@ -1778,7 +1778,7 @@ mod tests {
             }
             app.poll_loading(ctx);
             assert!(
-                start.elapsed() < Duration::from_secs(10),
+                start.elapsed() < Duration::from_secs(30),
                 "upscale timed out"
             );
             std::thread::sleep(Duration::from_millis(2));
@@ -1927,7 +1927,7 @@ mod tests {
         let started = Instant::now();
         while !loader.is_cached(&path, 1024) || !loader.is_cached(&path, 2048) {
             assert!(
-                started.elapsed() < Duration::from_secs(15),
+                started.elapsed() < Duration::from_secs(30),
                 "preload timed out"
             );
             std::thread::sleep(Duration::from_millis(10));

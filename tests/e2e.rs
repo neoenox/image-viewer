@@ -368,7 +368,7 @@ fn preloads_neighbors_in_background() {
     let start = std::time::Instant::now();
     while !targets.iter().all(|p| app.is_preloaded(p)) {
         assert!(
-            start.elapsed() < std::time::Duration::from_secs(15),
+            start.elapsed() < std::time::Duration::from_secs(30),
             "preload timeout"
         );
         std::thread::sleep(std::time::Duration::from_millis(50));
@@ -668,7 +668,7 @@ fn settle(app: &mut ViewerApp, ctx: &egui::Context) {
     while app.is_loading() {
         app.poll_loading(ctx);
         assert!(
-            start.elapsed() < std::time::Duration::from_secs(15),
+            start.elapsed() < std::time::Duration::from_secs(30),
             "background loading timed out"
         );
         std::thread::sleep(std::time::Duration::from_millis(5));

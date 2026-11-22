@@ -21,3 +21,4 @@ mod update;
 pub use files::{collect_siblings, first_image_in_dir, is_supported, natural_cmp, SUPPORTED_EXTS};
 pub use imaging::decode_image;
 pub use loader::{CachedImage, ImageLoader};
+pub use update::check_updates_once;

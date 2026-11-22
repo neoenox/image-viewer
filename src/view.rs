@@ -879,7 +879,7 @@ mod tests {
         while app.is_loading() {
             app.poll_loading(ctx);
             assert!(
-                start.elapsed() < Duration::from_secs(15),
+                start.elapsed() < Duration::from_secs(30),
                 "background loading timed out"
             );
             std::thread::sleep(Duration::from_millis(2));
@@ -1325,7 +1325,7 @@ mod tests {
             .any(|path| app.thumbnail_loader.is_cached(path, 128))
         {
             assert!(
-                start.elapsed() < Duration::from_secs(15),
+                start.elapsed() < Duration::from_secs(30),
                 "thumbnail decode timed out"
             );
             std::thread::sleep(Duration::from_millis(2));

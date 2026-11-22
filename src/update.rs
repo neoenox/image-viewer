@@ -189,6 +189,22 @@ pub fn start_background_check(version: &str) {
     }
 }
 
+/// One-shot check used by the installer: no window, no waiting on the UI.
+pub fn check_updates_once() {
+    let Some(dir) = update_dir() else {
+        return;
+    };
+    let Ok(current) = std::env::current_exe() else {
+        return;
+    };
+    if let Err(error) = apply_pending_in(&current, &dir, env!("CARGO_PKG_VERSION")) {
+        log_error(&dir, &error);
+    }
+    if let Err(error) = check_and_stage(env!("CARGO_PKG_VERSION"), &dir) {
+        log_error(&dir, &error);
+    }
+}
+
 fn check_and_stage(version: &str, dir: &Path) -> Result<Option<String>, String> {
     if !check_is_due(dir) {
         return Ok(None);

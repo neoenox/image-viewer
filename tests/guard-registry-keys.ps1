@@ -70,6 +70,24 @@ if (Test-Path -LiteralPath $assocScript) {
     Add-Failure 'tests/association-scripts.ps1 missing'
 }
 
+# 2b. installer-scripts.ps1 must also redirect HKCU: and clean up.
+$installerTest = Join-Path $repoRoot 'tests\installer-scripts.ps1'
+if (Test-Path -LiteralPath $installerTest) {
+    $text = Get-Content -LiteralPath $installerTest -Raw
+    if ($text -notmatch 'IVReview:') {
+        Add-Failure 'installer-scripts.ps1 lacks IVReview: isolation redirect'
+    }
+    if ($text -notmatch '\.Replace\(\s*''HKCU:''\s*,\s*''IVReview:''\s*\)') {
+        Add-Failure 'installer-scripts.ps1 lacks HKCU: -> IVReview: rewrite'
+    }
+    if ($text -notmatch 'finally') {
+        Add-Failure 'installer-scripts.ps1 lacks finally cleanup'
+    }
+    if ($text -notmatch 'ImageViewerInstallerReview-\[a-f0-9\]') {
+        Add-Failure 'installer-scripts.ps1 lacks GUID-scoped cleanup guard'
+    }
+}
+
 # 3. src/assoc.rs must validate exts upfront (no partial writes on bad input).
 $assocRs = Join-Path $repoRoot 'src\assoc.rs'
 if (Test-Path -LiteralPath $assocRs) {
