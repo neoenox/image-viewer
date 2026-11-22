@@ -163,7 +163,6 @@ fn record_check(dir: &Path) {
     let _ = fs::write(dir.join(LAST_CHECK), unix_seconds().to_string());
 }
 
-
 /// Starts the release check off the UI thread and publishes its outcome.
 pub fn start_background_check_with_notice(version: &str, notice: Arc<Mutex<Option<String>>>) {
     #[cfg(windows)]
