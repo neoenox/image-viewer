@@ -2,7 +2,7 @@ use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
 pub const SUPPORTED_EXTS: &[&str] = &[
     "jpg", "jpeg", "png", "gif", "bmp", "webp", "tif", "tiff", "ico", "dds", "hdr", "exr", "qoi",
-    "pbm", "pgm", "ppm", "pam",
+    "pbm", "pgm", "ppm", "pam", "mp4",
 ];
 
 pub fn is_supported(path: &Path) -> bool {
@@ -10,6 +10,13 @@ pub fn is_supported(path: &Path) -> bool {
         .and_then(|e| e.to_str())
         .map(|e| SUPPORTED_EXTS.contains(&e.to_ascii_lowercase().as_str()))
         .unwrap_or(false)
+}
+
+/// Videos use the Media Foundation frame source instead of the image loader.
+pub(crate) fn is_video(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("mp4"))
 }
 
 /// Windows filesystems are case-insensitive; `Path`'s `PartialEq` is not.
@@ -146,6 +153,13 @@ pub fn first_image_in_dir(dir: &Path) -> Option<PathBuf> {
 mod performance_regression_tests {
     use super::*;
 
+    #[test]
+    fn mp4_is_supported_and_routed_to_video() {
+        let path = Path::new("clip.MP4");
+        assert!(is_supported(path));
+        assert!(is_video(path));
+        assert!(!is_video(Path::new("photo.png")));
+    }
     #[test]
     fn natural_sort_keeps_number_semantics_and_unicode_paths() {
         let mut files = vec![

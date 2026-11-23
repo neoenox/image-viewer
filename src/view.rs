@@ -206,7 +206,12 @@ impl eframe::App for ViewerApp {
                     }
                     if self.is_animated() {
                         ui.separator();
-                        ui.label(format!("アニメ #{}", self.anim_index() + 1));
+                        let label = if self.video.is_some() {
+                            "動画"
+                        } else {
+                            "アニメ"
+                        };
+                        ui.label(format!("{} #{}", label, self.anim_index() + 1));
                     }
                 }
                 if self.loading {
