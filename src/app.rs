@@ -380,6 +380,7 @@ impl ViewerApp {
         if is_video(&path) {
             self.video = Some(crate::video::Video::new(path, self.tex_cap));
             self.anim_due = Some(Instant::now());
+            self.orig_dims = Some((1, 1));
             if let Some(ctx) = ctx {
                 let color = egui::ColorImage::new([1, 1], vec![egui::Color32::TRANSPARENT]);
                 self.texture = Some(ctx.load_texture("video", color, egui::TextureOptions::LINEAR));
@@ -2215,5 +2216,20 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(5));
         }
+    }
+
+    #[test]
+    fn video_selection_has_valid_placeholder_dimensions() {
+        let dir = std::env::temp_dir().join(format!("iv-video-dims-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("clip.mp4");
+        std::fs::write(&path, b"not a real video").unwrap();
+        let ctx = egui::Context::default();
+        let mut app = ViewerApp::new(None);
+        app.open_path(path, Some(&ctx));
+        assert!(app.video.is_some());
+        assert_eq!(app.display_image_size(), Some(egui::vec2(1.0, 1.0)));
+        drop(app);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

@@ -267,7 +267,10 @@ impl eframe::App for ViewerApp {
             let view_rect = ui.available_rect_before_wrap();
             self.view_rect = view_rect;
             let avail = view_rect.size();
-            let size = self.display_image_size().unwrap();
+            let Some(size) = self.display_image_size() else {
+                self.texture = None;
+                return;
+            };
             let (iw, ih) = (size.x, size.y);
             self.view_avail = avail;
             self.view_img = egui::vec2(iw, ih);

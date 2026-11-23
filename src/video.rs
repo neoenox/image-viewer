@@ -91,26 +91,39 @@ fn send(
 }
 
 #[cfg(windows)]
+fn ensure_media_foundation() -> bool {
+    use windows::Win32::Media::MediaFoundation::{MFStartup, MFSTARTUP_NOSOCKET, MF_VERSION};
+    static START: Once = Once::new();
+    static OK: AtomicBool = AtomicBool::new(false);
+    START.call_once(|| {
+        OK.store(
+            unsafe { MFStartup(MF_VERSION, MFSTARTUP_NOSOCKET).is_ok() },
+            Ordering::Release,
+        );
+    });
+    OK.load(Ordering::Acquire)
+}
+
+#[cfg(windows)]
 fn decode(
     path: &Path,
     cap: usize,
     tx: &mpsc::SyncSender<Result<VideoFrame, String>>,
     stop: &AtomicBool,
 ) -> Result<(), String> {
-    use windows::Win32::Media::MediaFoundation::{
-        MFShutdown, MFStartup, MFSTARTUP_NOSOCKET, MF_VERSION,
-    };
     use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED};
 
     unsafe {
         CoInitializeEx(None, COINIT_APARTMENTTHREADED)
             .ok()
             .map_err(|e| format!("COM init: {e}"))?;
-        let started = MFStartup(MF_VERSION, MFSTARTUP_NOSOCKET).is_ok();
-        let result = decode_inner(path, cap, tx, stop, started);
-        if started {
-            let _ = MFShutdown();
-        }
+        // MFStartup is process-global; per-worker startup/shutdown races when
+        // videos are switched quickly, so initialize once and keep it alive.
+        let result = if ensure_media_foundation() {
+            decode_inner(path, cap, tx, stop)
+        } else {
+            Err("Media Foundationを初期化できませんでした".to_owned())
+        };
         CoUninitialize();
         result
     }
@@ -122,15 +135,10 @@ unsafe fn decode_inner(
     cap: usize,
     tx: &mpsc::SyncSender<Result<VideoFrame, String>>,
     stop: &AtomicBool,
-    started: bool,
 ) -> Result<(), String> {
     use std::slice;
     use windows::core::PCWSTR;
     use windows::Win32::Media::MediaFoundation::*;
-
-    if !started {
-        return Err("Media Foundationを初期化できませんでした".to_owned());
-    }
     let wide: Vec<u16> = path
         .to_string_lossy()
         .encode_utf16()
@@ -191,7 +199,7 @@ unsafe fn decode_inner(
             let size = current.GetUINT64(&MF_MT_FRAME_SIZE).unwrap_or(0);
             let w = (size >> 32) as u32;
             let h = (size & 0xFFFF_FFFF) as u32;
-            if w == 0 || h == 0 || w > 8192 || h > 8192 {
+            if w == 0 || h == 0 || w > 4096 || h > 4096 {
                 return Err("invalid video frame size".to_owned());
             }
             width = w;
