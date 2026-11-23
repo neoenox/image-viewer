@@ -377,6 +377,16 @@ impl ViewerApp {
         };
         self.current_mtime = crate::loader::modified_time(&path);
         self.last_mtime_check = Some(Instant::now());
+        if is_video(&path) {
+            self.video = Some(crate::video::Video::new(path, self.tex_cap));
+            self.anim_due = Some(Instant::now());
+            if let Some(ctx) = ctx {
+                let color = egui::ColorImage::new([1, 1], vec![egui::Color32::TRANSPARENT]);
+                self.texture = Some(ctx.load_texture("video", color, egui::TextureOptions::LINEAR));
+                ctx.request_repaint();
+            }
+            return;
+        }
         self.loading = true;
         if self.show_stats {
             self.stats.note_selection(Instant::now());
@@ -519,6 +529,27 @@ impl ViewerApp {
                     Err(error) => {
                         self.status_msg = format!("GIF再生エラー: {error}");
                         self.animation = None;
+                        self.anim_due = None;
+                    }
+                }
+            } else if let Some(frame) = self.video.as_mut().and_then(|v| v.poll()) {
+                match frame {
+                    Ok(frame) => {
+                        let (w, h) = frame.rgba.dimensions();
+                        self.orig_dims = Some((w, h));
+                        self.anim_frame += 1;
+                        self.anim_total = self.anim_total.max(self.anim_frame);
+                        let color = egui::ColorImage::from_rgba_unmultiplied(
+                            [w as usize, h as usize],
+                            frame.rgba.as_raw(),
+                        );
+                        self.texture =
+                            Some(ctx.load_texture("video", color, egui::TextureOptions::LINEAR));
+                        self.anim_due = Some(Instant::now() + frame.delay);
+                    }
+                    Err(error) => {
+                        self.status_msg = format!("動画再生エラー: {error}");
+                        self.video = None;
                         self.anim_due = None;
                     }
                 }

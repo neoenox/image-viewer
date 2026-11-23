@@ -1738,6 +1738,7 @@ dependencies = [
  "raw-window-handle",
  "rfd",
  "ttf-parser",
+ "windows 0.61.3",
  "winreg",
  "winresource",
 ]
