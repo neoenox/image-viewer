@@ -146,6 +146,7 @@ pub struct ViewerApp {
     pub(crate) anim_due: Option<Instant>,
     pub(crate) anim_frame: usize,
     pub(crate) anim_total: usize,
+    pub(crate) video: Option<crate::video::Video>,
     pub(crate) generation: u64,
     pub(crate) loading: bool,
     pub(crate) detail_pending: bool,
@@ -243,6 +244,7 @@ impl ViewerApp {
             anim_due: None,
             anim_frame: 0,
             anim_total: 0,
+            video: None,
             generation: 0,
             loading: false,
             detail_pending: false,
@@ -291,6 +293,9 @@ impl ViewerApp {
 
     pub(crate) fn rebuild_texture(&mut self, ctx: &egui::Context) {
         // GPU上限は環境で変わり得るため都度取得
+        if self.video.is_some() {
+            return;
+        }
         self.tex_cap = ctx.input(|i| i.max_texture_side).max(512);
         if self.base.is_some() && self.base_cap != self.tex_cap {
             self.load_current(None);
@@ -362,6 +367,7 @@ impl ViewerApp {
         self.anim_due = None;
         self.anim_frame = 0;
         self.anim_total = 0;
+        self.video = None;
         self.peek_saved = None;
         self.pan_offset = egui::Vec2::ZERO;
         self.wheel_accum = 0.0;
@@ -372,7 +378,6 @@ impl ViewerApp {
         self.current_mtime = crate::loader::modified_time(&path);
         self.last_mtime_check = Some(Instant::now());
         self.loading = true;
-        // 「選択 → 表示」の起点。監視中だけ記録する。
         if self.show_stats {
             self.stats.note_selection(Instant::now());
         }
@@ -841,7 +846,7 @@ impl ViewerApp {
         self.texture.as_ref().map(|t| t.size())
     }
     pub fn is_animated(&self) -> bool {
-        self.animation.is_some()
+        self.animation.is_some() || self.video.is_some()
     }
     /// Total is learned when the first loop completes; until then it is the observed count.
     pub fn frame_count(&self) -> usize {

@@ -113,6 +113,8 @@ read-only folder stays on its current version.
 - T opens the thumbnail list. Click a thumbnail or filename to select it.
 - Arrow keys (or A / D): previous/next; Home / End: first/last; + / - (or E / Q): zoom; 0: fit;
   R / Shift+R: rotate; F / F11: fullscreen; Space: slideshow; Ctrl+O: open; Esc: leave fullscreen or stop the slideshow.
+- MP4 videos: play through Windows Media Foundation (video only, no audio; plays once).
+  Frames use the same size cap as images and appear in the status bar with a frame counter.
 - F12 shows the display-latency overlay (see [Latency benchmark](#latency-benchmark)); it can also be
   enabled at startup with `image-viewer.exe --stats`.
 - Photos open upright: the EXIF orientation that cameras and phones record (JPEG, PNG,
@@ -204,6 +206,7 @@ blocker.
 - `win_icon.rs`: window/taskbar icon applied via Win32 (keeps eframe's icon code out of the exe).
 - `assoc.rs`: Windows file association registration and restoration.
 - `update.rs`: silent, checksum-verified release check, staging and next-launch exe swap.
+- `video.rs`: bounded Media Foundation frame decoding for MP4 files.
 
 The implementation plan and acceptance criteria are in
 [docs/responsive-viewer-plan.md](docs/responsive-viewer-plan.md).
