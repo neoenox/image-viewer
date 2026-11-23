@@ -376,6 +376,12 @@ impl ViewerApp {
             return;
         };
         self.current_mtime = crate::loader::modified_time(&path);
+        crate::report::set_context(
+            path.extension()
+                .and_then(|ext| ext.to_str())
+                .unwrap_or("unknown")
+                .to_ascii_lowercase(),
+        );
         self.last_mtime_check = Some(Instant::now());
         if is_video(&path) {
             self.video = Some(crate::video::Video::new(path, self.tex_cap));
@@ -1216,6 +1222,10 @@ pub fn run() -> eframe::Result<()> {
     app.settings_path = crate::settings::ViewerSettings::default_path();
     if let Some(path) = &app.settings_path {
         app.settings = crate::settings::ViewerSettings::load(path);
+    }
+    if let Some(report) = crate::report::take_pending() {
+        app.show_update_message("クラッシュ内容をGitHub issueに事前入力しました".to_owned());
+        crate::report::open_issue(&report);
     }
     if app.settings.auto_update && !no_update {
         crate::update::start_background_check_with_notice(env!("CARGO_PKG_VERSION"), notice);

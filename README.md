@@ -127,6 +127,9 @@ read-only folder stays on its current version.
 - Settings are saved to `%APPDATA%\image-viewer\settings.txt` when changed and loaded at
   startup. Delete the file to return to the defaults. The window size, position and
   maximized state are saved there too, so the viewer reopens where you left it.
+- A crash is recorded in `%APPDATA%\image-viewer\crash.txt`. The next launch opens a
+  GitHub issue form with that report prefilled. Nothing is submitted automatically,
+  and full file paths are not included.
 
 The image being opened, neighbour preloads, and original-size region decoding each
 run on their own background worker, so opening an image never waits behind a preload
@@ -211,6 +214,7 @@ blocker.
 - `assoc.rs`: Windows file association registration and restoration.
 - `update.rs`: silent, checksum-verified release check, staging and next-launch exe swap.
 - `video.rs`: bounded Media Foundation frame decoding for MP4 files.
+- `report.rs`: panic hook, local crash report and prefilled GitHub issue URL.
 
 The implementation plan and acceptance criteria are in
 [docs/responsive-viewer-plan.md](docs/responsive-viewer-plan.md).
