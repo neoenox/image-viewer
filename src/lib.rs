@@ -23,3 +23,5 @@ pub use imaging::decode_image;
 mod video;
 pub use loader::{CachedImage, ImageLoader};
 pub use update::check_updates_once;
+mod report;
+pub use report::install_panic_hook;
