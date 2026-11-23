@@ -222,7 +222,7 @@ impl eframe::App for ViewerApp {
                     ui.label(&self.status_msg);
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.small(format!(
+                    ui.label(format!(
                         "v{} · 上端:操作 / Tab:固定 / T:一覧",
                         env!("CARGO_PKG_VERSION")
                     ));
@@ -470,12 +470,13 @@ impl ViewerApp {
     fn window_title_text(&self) -> String {
         match self.current_path() {
             Some(p) => format!(
-                "{} - 画像ビューワー",
+                "{} - 画像ビューワー v{}",
                 p.file_name()
                     .map(|s| s.to_string_lossy().into_owned())
-                    .unwrap_or_default()
+                    .unwrap_or_default(),
+                env!("CARGO_PKG_VERSION")
             ),
-            None => "画像ビューワー".to_owned(),
+            None => format!("画像ビューワー v{}", env!("CARGO_PKG_VERSION")),
         }
     }
 
@@ -570,6 +571,8 @@ impl ViewerApp {
             .open(&mut open)
             .resizable(false)
             .show(ctx, |ui| {
+                ui.label(format!("バージョン: v{}", env!("CARGO_PKG_VERSION")));
+                ui.separator();
                 ui.checkbox(
                     &mut self.settings.wheel_navigation,
                     "ホイールで前後の画像へ移動",
@@ -1067,8 +1070,9 @@ mod tests {
         let size = egui::vec2(800.0, 600.0);
 
         let out = update_frame(&mut app, &ctx, raw_input(size, None));
-        assert_eq!(app.window_title, "画像ビューワー");
-        assert_eq!(sent_titles(&out), vec!["画像ビューワー".to_owned()]);
+        let base = format!("画像ビューワー v{}", env!("CARGO_PKG_VERSION"));
+        assert_eq!(app.window_title, base);
+        assert_eq!(sent_titles(&out), vec![base]);
 
         // 2フレーム目は変化なし → コマンドを送らない。
         let out = update_frame(&mut app, &ctx, raw_input(size, None));
@@ -1082,8 +1086,9 @@ mod tests {
         app.open_path(dir.join("a.png"), Some(&ctx));
         settle(&mut app, &ctx);
         let out = update_frame(&mut app, &ctx, raw_input(size, None));
-        assert_eq!(app.window_title, "a.png - 画像ビューワー");
-        assert_eq!(sent_titles(&out), vec!["a.png - 画像ビューワー".to_owned()]);
+        let titled = format!("a.png - 画像ビューワー v{}", env!("CARGO_PKG_VERSION"));
+        assert_eq!(app.window_title, titled);
+        assert_eq!(sent_titles(&out), vec![titled]);
         let out = update_frame(&mut app, &ctx, raw_input(size, None));
         assert!(sent_titles(&out).is_empty());
 
@@ -1188,6 +1193,10 @@ mod tests {
 
         let out = update_frame_settled(&mut app, &ctx, raw_input(size, None));
         assert!(shows(&out, "操作設定"));
+        assert!(shows(
+            &out,
+            &format!("バージョン: v{}", env!("CARGO_PKG_VERSION"))
+        ));
         assert!(shows(
             &out,
             "ホイール:前後 / Ctrl+ホイール:拡大縮小 / ドラッグ:視点移動"
