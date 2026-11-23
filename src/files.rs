@@ -2,8 +2,10 @@ use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
 pub const SUPPORTED_EXTS: &[&str] = &[
     "jpg", "jpeg", "png", "gif", "bmp", "webp", "tif", "tiff", "ico", "dds", "hdr", "exr", "qoi",
-    "pbm", "pgm", "ppm", "pam", "mp4",
+    "pbm", "pgm", "ppm", "pam", "mp4", "m4v", "mov", "avi", "wmv", "webm",
 ];
+
+const VIDEO_EXTS: &[&str] = &["mp4", "m4v", "mov", "avi", "wmv", "webm"];
 
 pub fn is_supported(path: &Path) -> bool {
     path.extension()
@@ -16,7 +18,10 @@ pub fn is_supported(path: &Path) -> bool {
 pub(crate) fn is_video(path: &Path) -> bool {
     path.extension()
         .and_then(|ext| ext.to_str())
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("mp4"))
+        .is_some_and(|ext| {
+            let ext = ext.to_ascii_lowercase();
+            VIDEO_EXTS.contains(&ext.as_str())
+        })
 }
 
 /// Windows filesystems are case-insensitive; `Path`'s `PartialEq` is not.

@@ -222,7 +222,10 @@ impl eframe::App for ViewerApp {
                     ui.label(&self.status_msg);
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.small("上端:操作 / Tab:固定 / T:一覧");
+                    ui.small(format!(
+                        "v{} · 上端:操作 / Tab:固定 / T:一覧",
+                        env!("CARGO_PKG_VERSION")
+                    ));
                 });
             });
         });
@@ -1139,6 +1142,7 @@ mod tests {
         open(&mut app, &ctx, dir.join("a.png")); // 100x80、4枚中1枚目
         let out = update_frame(&mut app, &ctx, raw_input(egui::vec2(800.0, 600.0), None));
         assert!(shows(&out, "a.png  (1/4)"));
+        assert!(shows(&out, &format!("v{}", env!("CARGO_PKG_VERSION"))));
         assert!(shows(&out, "100×80"));
         assert!(shows(&out, "フィット"));
         assert!(!shows(&out, "90°"));
