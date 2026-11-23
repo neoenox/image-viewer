@@ -159,10 +159,19 @@ mod performance_regression_tests {
     use super::*;
 
     #[test]
-    fn mp4_is_supported_and_routed_to_video() {
-        let path = Path::new("clip.MP4");
-        assert!(is_supported(path));
-        assert!(is_video(path));
+    fn video_formats_are_supported_and_routed_to_video() {
+        for name in [
+            "clip.MP4",
+            "clip.m4v",
+            "clip.MOV",
+            "clip.avi",
+            "clip.wmv",
+            "clip.webm",
+        ] {
+            let path = Path::new(name);
+            assert!(is_supported(path), "{name} should be supported");
+            assert!(is_video(path), "{name} should use the video source");
+        }
         assert!(!is_video(Path::new("photo.png")));
     }
     #[test]
