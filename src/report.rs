@@ -5,7 +5,7 @@
 //! the user still decides whether to submit it. No token or network call is
 //! made by the app itself.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Mutex;
 
 const CRASH_FILE: &str = "crash.txt";
@@ -123,7 +123,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(CRASH_FILE);
         std::fs::write(&path, "report").unwrap();
-        let read = |path: &Path| -> Option<String> {
+        let read = |path: &std::path::Path| -> Option<String> {
             let text = std::fs::read_to_string(path).ok()?;
             let _ = std::fs::remove_file(path);
             Some(text)
