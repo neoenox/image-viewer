@@ -45,9 +45,10 @@ measuring platform.
 
 ## Installing
 
-There is no MSI installer; `scripts/install.ps1` performs a per-user install
-(no admin required):
-
+Download `image-viewer-installer-<version>-windows-x86_64.zip` from the
+GitHub Release, extract it, and run `install.ps1` from the extracted folder.
+The ZIP contains the exe and all association/uninstall scripts, so no
+repository checkout or Rust toolchain is needed. For a local build:
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\install.ps1 `
   -ExePath target\release\image-viewer.exe
@@ -58,6 +59,8 @@ Menu shortcut, registers the file associations and adds an uninstall entry.
 The installer also runs `image-viewer.exe --check-update`, so a newer release
 is verified and staged silently during installation and applied at the next
 launch. Use `scripts\uninstall.ps1` to reverse it.
+The version is shown at the right end of the status bar, so an applied update
+can be identified without opening a dialog.
 
 Windows protects the double-click default (`UserChoice`), so the installer
 registers the viewer as a candidate but cannot make it the default. Finish that
@@ -113,7 +116,8 @@ read-only folder stays on its current version.
 - T opens the thumbnail list. Click a thumbnail or filename to select it.
 - Arrow keys (or A / D): previous/next; Home / End: first/last; + / - (or E / Q): zoom; 0: fit;
   R / Shift+R: rotate; F / F11: fullscreen; Space: slideshow; Ctrl+O: open; Esc: leave fullscreen or stop the slideshow.
-- MP4 videos: play through Windows Media Foundation (video only, no audio; plays once).
+- Videos (MP4, M4V, MOV, AVI, WMV, WebM): play through Windows Media Foundation
+  (video only, no audio; plays once). Codec support depends on Windows.
   Frames use the same size cap as images and appear in the status bar with a frame counter.
 - F12 shows the display-latency overlay (see [Latency benchmark](#latency-benchmark)); it can also be
   enabled at startup with `image-viewer.exe --stats`.
