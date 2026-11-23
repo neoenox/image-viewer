@@ -5,6 +5,8 @@
 
 use crate::imaging::downscale_to_cap;
 use std::path::{Path, PathBuf};
+#[cfg(windows)]
+use std::sync::Once;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     mpsc, Arc,
