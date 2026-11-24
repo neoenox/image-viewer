@@ -1,12 +1,14 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-//! Native, shell-free installer. The application exe is embedded at build time.
+//! Native GUI installer. The application exe is embedded at build time; no
+//! PowerShell or other shell is involved.
 
-use std::ffi::OsString;
 use std::fs;
 use std::path::PathBuf;
-use std::process::Command;
+use std::sync::mpsc;
+use std::time::Duration;
 
+use eframe::egui;
 use image_viewer::assoc::{register, APP_NAME, CAPS_BASE, PROG_ID};
 use image_viewer::SUPPORTED_EXTS;
 use winreg::enums::HKEY_CURRENT_USER;
@@ -25,18 +27,49 @@ fn main() {
     }
 }
 
-fn install() -> Result<(), String> {
+fn main() -> eframe::Result<()> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let step = |text: &str| {
+            let _ = tx.send(Progress::Step(text.to_owned()));
+        };
+        let result = install(&step);
+        let _ = tx.send(Progress::Done(result));
+    });
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([520.0, 320.0])
+            .with_resizable(false),
+        ..Default::default()
+    };
+    eframe::run_native(
+        "画像ビューワー セットアップ",
+        options,
+        Box::new(move |_| {
+            Ok(Box::new(InstallerApp {
+                rx,
+                status: Vec::new(),
+                result: None,
+            }))
+        }),
+    )
+}
+
+fn install(step: &impl Fn(&str)) -> Result<PathBuf, String> {
     let local = std::env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)
         .ok_or_else(|| "LOCALAPPDATA が設定されていません".to_owned())?;
     let dir = local.join("Programs").join("ImageViewer");
-    fs::create_dir_all(&dir).map_err(|e| format!("install dir: {e}"))?;
     let exe = dir.join("image-viewer.exe");
-    fs::write(&exe, PAYLOAD).map_err(|e| format!("write exe: {e}"))?;
 
+    step("インストール先を作成しています");
+    fs::create_dir_all(&dir).map_err(|e| format!("install dir: {e}"))?;
+    step("本体を配置しています");
+    fs::write(&exe, PAYLOAD).map_err(|e| format!("write exe: {e}"))?;
+    step("ファイル関連付けを登録しています");
     register(PROG_ID, APP_NAME, CAPS_BASE, &exe, SUPPORTED_EXTS)
         .map_err(|e| format!("associations: {e}"))?;
-
+    step("アンインストール情報を登録しています");
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
     let (key, _) = hkcu
         .create_subkey(r"Software\Microsoft\Windows\CurrentVersion\Uninstall\ImageViewer")
@@ -47,7 +80,7 @@ fn install() -> Result<(), String> {
         .map_err(|e| format!("DisplayVersion: {e}"))?;
     key.set_value("InstallLocation", &dir.to_string_lossy().into_owned())
         .map_err(|e| format!("InstallLocation: {e}"))?;
-
+    step("スタートメニューショートカットを作成しています");
     create_shortcut(&dir, &exe)?;
     let _ = Command::new(&exe).arg("--check-update").status();
     Ok(())
@@ -67,19 +100,18 @@ fn create_shortcut(dir: &std::path::Path, exe: &std::path::Path) -> Result<(), S
             .map_err(|e| format!("COM init: {e}"))?;
         let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER)
             .map_err(|e| format!("ShellLink: {e}"))?;
-        let exe_wide: Vec<u16> = wide(exe.as_os_str());
+        let exe_wide = wide(exe);
         link.SetPath(PCWSTR(exe_wide.as_ptr()))
             .map_err(|e| format!("SetPath: {e}"))?;
-        let dir_wide: Vec<u16> = wide(dir.as_os_str());
+        let dir_wide = wide(dir);
         link.SetWorkingDirectory(PCWSTR(dir_wide.as_ptr()))
             .map_err(|e| format!("SetWorkingDirectory: {e}"))?;
-        let app_name = OsString::from(APP_NAME);
-        let desc_wide: Vec<u16> = wide(app_name.as_os_str());
+        let desc_wide: Vec<u16> = APP_NAME.encode_utf16().chain(std::iter::once(0)).collect();
         link.SetDescription(PCWSTR(desc_wide.as_ptr()))
             .map_err(|e| format!("SetDescription: {e}"))?;
         let persist: IPersistFile = link.cast().map_err(|e| format!("IPersistFile: {e}"))?;
         let lnk = dir.join("画像ビューワー.lnk");
-        let lnk_wide: Vec<u16> = wide(lnk.as_os_str());
+        let lnk_wide = wide(&lnk);
         persist
             .Save(PCWSTR(lnk_wide.as_ptr()), true)
             .map_err(|e| format!("Save shortcut: {e}"))?;
@@ -98,23 +130,5 @@ fn wide(value: &std::ffi::OsStr) -> Vec<u16> {
     {
         let _ = value;
         Vec::new()
-    }
-}
-
-fn message_box(text: &str, error: bool) {
-    use windows::core::PCWSTR;
-    use windows::Win32::UI::WindowsAndMessaging::{
-        MessageBoxW, MB_ICONERROR, MB_ICONINFORMATION, MB_OK,
-    };
-
-    let text: Vec<u16> = wide(OsString::from(text).as_os_str());
-    let caption: Vec<u16> = wide(OsString::from("画像ビューワー セットアップ").as_os_str());
-    let style = if error {
-        MB_ICONERROR | MB_OK
-    } else {
-        MB_ICONINFORMATION | MB_OK
-    };
-    unsafe {
-        MessageBoxW(None, PCWSTR(text.as_ptr()), PCWSTR(caption.as_ptr()), style);
     }
 }

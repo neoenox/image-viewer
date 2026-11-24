@@ -133,6 +133,8 @@ pub struct ViewerApp {
     pub(crate) interval_slider_id: Option<egui::Id>,
     /// Outcomes published by the background updater (staged / failed).
     pub(crate) update_notice: Arc<Mutex<Option<String>>>,
+    /// Process start time for optional startup diagnostics.
+    pub(crate) startup_at: Instant,
     pub(crate) pan_offset: egui::Vec2,
     pub(crate) wheel_accum: f32,
     pub(crate) view_avail: egui::Vec2,
@@ -246,6 +248,7 @@ impl ViewerApp {
             anim_total: 0,
             video: None,
             generation: 0,
+            startup_at: Instant::now(),
             loading: false,
             detail_pending: false,
             detail_unavailable: false,
@@ -491,6 +494,7 @@ impl ViewerApp {
             self.show_update_message(message);
         }
         if let Some((generation, result)) = self.loader.poll() {
+            let first_texture = self.texture.is_none();
             if generation == self.generation {
                 self.loading = false;
                 match result {
@@ -508,6 +512,9 @@ impl ViewerApp {
                         self.rebuild_texture(ctx);
                         if self.show_stats {
                             self.stats.note_displayed(Instant::now());
+                        }
+                        if first_texture {
+                            startup_log("first texture", self.startup_at);
                         }
                     }
                     Err(error) => {
@@ -1202,16 +1209,37 @@ fn parse_launch_args<I: IntoIterator<Item = std::ffi::OsString>>(
 fn no_update_requested<I: IntoIterator<Item = std::ffi::OsString>>(args: I) -> bool {
     args.into_iter().any(|arg| arg == "--no-update")
 }
-
+/// Append timing lines only when `IV_STARTUP_LOG` is set.
+fn startup_log(label: &str, started: Instant) {
+    if std::env::var_os("IV_STARTUP_LOG").is_none() {
+        return;
+    }
+    let Some(path) = crate::settings::ViewerSettings::default_path()
+        .and_then(|p| p.parent().map(|dir| dir.join("startup.log")))
+    else {
+        return;
+    };
+    use std::io::Write;
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(file, "{label}: {} ms", started.elapsed().as_millis());
+    }
+}
 pub fn run() -> eframe::Result<()> {
-    // 前回ステージ済みの更新を、ウィンドウを作る前にサイレント適用する。
+    let started = Instant::now();
+    startup_log("run begin", started);
     let applied = crate::update::apply_pending();
     let notice = Arc::new(Mutex::new(None));
+    startup_log("pending update applied", started);
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     let no_update = no_update_requested(args.iter().cloned());
     let (initial, stats) = parse_launch_args(args);
     let mut app = ViewerApp::new(initial);
     app.update_notice = notice.clone();
+    startup_log("app constructed", started);
     match applied {
         Ok(Some(version)) => app.show_update_message(format!("更新を適用しました: v{version}")),
         Ok(None) => {}
@@ -1223,6 +1251,7 @@ pub fn run() -> eframe::Result<()> {
     if let Some(path) = &app.settings_path {
         app.settings = crate::settings::ViewerSettings::load(path);
     }
+    startup_log("settings loaded", started);
     if let Some(report) = crate::report::take_pending() {
         app.show_update_message("クラッシュ内容をGitHub issueに事前入力しました".to_owned());
         crate::report::open_issue(&report);
