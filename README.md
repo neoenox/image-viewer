@@ -66,6 +66,10 @@ Windows protects the double-click default (`UserChoice`), so the installer
 registers the viewer as a candidate but cannot make it the default. Finish that
 in Settings > Default apps if needed.
 
+Older builds that predate the built-in update check can run `check-update.ps1`
+from the installer ZIP. It only reports the installed and latest versions;
+add `-Open` to open the release page in a browser.
+
 ## Releasing
 
 Pushing a `v*` tag runs `.github/workflows/release.yml`, which tests, builds, and
