@@ -50,8 +50,8 @@ It is a native Rust installer with the application exe embedded; it does not
 invoke PowerShell. It copies the exe to `%LOCALAPPDATA%\Programs\ImageViewer`,
 creates a Start Menu shortcut, registers associations and adds an uninstall entry.
 
-The ZIP package `image-viewer-installer-<version>-windows-x86_64.zip` contains
-the same scripts for manual installation or repair:
+The optional ZIP `image-viewer-tools-<version>-windows-x86_64.zip` contains the
+same scripts for manual installation or repair, plus `check-update.ps1`:
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
 ```

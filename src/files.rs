@@ -127,8 +127,10 @@ pub fn collect_siblings(path: &Path) -> Vec<PathBuf> {
     };
     let mut files: Vec<PathBuf> = match std::fs::read_dir(parent) {
         Ok(rd) => rd
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| p.is_file() && is_supported(p))
+            .filter_map(|e| e.ok())
+            .filter(|e| is_supported(Path::new(&e.file_name())))
+            .map(|e| e.path())
+            .filter(|p| p.is_file())
             .collect(),
         Err(_) => return vec![path.to_path_buf()],
     };
@@ -147,8 +149,10 @@ pub fn collect_siblings(path: &Path) -> Vec<PathBuf> {
 pub fn first_image_in_dir(dir: &Path) -> Option<PathBuf> {
     let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
         .ok()?
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.is_file() && is_supported(p))
+        .filter_map(|e| e.ok())
+        .filter(|e| is_supported(Path::new(&e.file_name())))
+        .map(|e| e.path())
+        .filter(|p| p.is_file())
         .collect();
     sort_image_files(&mut files);
     files.into_iter().next()
