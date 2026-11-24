@@ -19,11 +19,65 @@ const PAYLOAD: &[u8] = include_bytes!(concat!(
     "/target/installer-payload.exe"
 ));
 
-fn main() {
-    if let Err(error) = install() {
-        message_box(&format!("インストールに失敗しました:\n{error}"), true);
-    } else {
-        message_box("画像ビューワーのインストールが完了しました。", false);
+enum Progress {
+    Step(String),
+    Done(Result<PathBuf, String>),
+}
+
+struct InstallerApp {
+    rx: mpsc::Receiver<Progress>,
+    status: Vec<String>,
+    result: Option<Result<PathBuf, String>>,
+}
+
+impl eframe::App for InstallerApp {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        while let Ok(progress) = self.rx.try_recv() {
+            match progress {
+                Progress::Step(text) => self.status.push(text),
+                Progress::Done(result) => self.result = Some(result),
+            }
+        }
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.heading(format!(
+                "画像ビューワー v{} セットアップ",
+                env!("CARGO_PKG_VERSION")
+            ));
+            ui.separator();
+            ui.label("このユーザー用にインストールします（管理者権限不要）。");
+            ui.add_space(8.0);
+            for line in &self.status {
+                ui.label(format!("• {line}"));
+            }
+            if let Some(result) = &self.result {
+                ui.add_space(8.0);
+                match result {
+                    Ok(exe) => {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(120, 220, 120),
+                            "インストールが完了しました。",
+                        );
+                        ui.label(exe.to_string_lossy());
+                        ui.horizontal(|ui| {
+                            if ui.button("画像ビューワーを開く").clicked() {
+                                let _ = std::process::Command::new(exe).spawn();
+                            }
+                            if ui.button("閉じる").clicked() {
+                                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                            }
+                        });
+                    }
+                    Err(error) => {
+                        ui.colored_label(egui::Color32::LIGHT_RED, format!("失敗: {error}"));
+                        if ui.button("閉じる").clicked() {
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                        }
+                    }
+                }
+            } else {
+                ctx.request_repaint_after(Duration::from_millis(100));
+            }
+        });
     }
 }
 
@@ -82,8 +136,11 @@ fn install(step: &impl Fn(&str)) -> Result<PathBuf, String> {
         .map_err(|e| format!("InstallLocation: {e}"))?;
     step("スタートメニューショートカットを作成しています");
     create_shortcut(&dir, &exe)?;
-    let _ = Command::new(&exe).arg("--check-update").status();
-    Ok(())
+    step("更新を確認しています");
+    let _ = std::process::Command::new(&exe)
+        .arg("--check-update")
+        .status();
+    Ok(exe)
 }
 
 fn create_shortcut(dir: &std::path::Path, exe: &std::path::Path) -> Result<(), String> {
@@ -120,15 +177,10 @@ fn create_shortcut(dir: &std::path::Path, exe: &std::path::Path) -> Result<(), S
     Ok(())
 }
 
-fn wide(value: &std::ffi::OsStr) -> Vec<u16> {
-    #[cfg(windows)]
-    {
-        use std::os::windows::ffi::OsStrExt;
-        value.encode_wide().chain(std::iter::once(0)).collect()
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = value;
-        Vec::new()
-    }
+fn wide(path: &std::path::Path) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt;
+    path.as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect()
 }
