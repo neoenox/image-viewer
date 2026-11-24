@@ -59,7 +59,7 @@ $instructions = @"
 "@
 Set-Content -LiteralPath (Join-Path $stage 'INSTALL.txt') -Value $instructions -Encoding UTF8
 
-$zip = Join-Path $outFull "image-viewer-installer-$Version-windows-x86_64.zip"
+$zip = Join-Path $outFull "image-viewer-tools-$Version-windows-x86_64.zip"
 Remove-Item -LiteralPath $zip -Force -ErrorAction SilentlyContinue
 Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip -CompressionLevel Optimal
 $hash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
