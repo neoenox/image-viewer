@@ -16,6 +16,20 @@ these ship in the exe; they are developer and CI helpers.
 | `package-release.ps1` | Build a release ZIP containing the exe, installer scripts and a checksum file. |
 | `check-update.ps1` | Standalone version check for older installs; reads the latest release checksums and reports the installed/latest version. |
 
+
+## Building the native setup exe
+
+The release `image-viewer-setup-<version>.exe` is built from
+`src/bin/installer.rs` with the application exe embedded. Copy the release exe
+to `target/installer-payload.exe`, then run:
+
+```powershell
+cargo build --release --features installer --bin image-viewer-setup
+```
+
+This produces `target/release/image-viewer-setup.exe`. No PowerShell is invoked
+when the resulting installer runs.
+
 ## gui-smoke.ps1
 
 Exercises the real window with automated input and asserts *state transitions*
