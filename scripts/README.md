@@ -14,6 +14,7 @@ these ship in the exe; they are developer and CI helpers.
 | `install.ps1` | Per-user install: copy exe to `%LOCALAPPDATA%\Programs\ImageViewer`, create a shortcut, register associations/uninstall entry, then run `--check-update` to stage updates silently. |
 | `uninstall.ps1` | Undo `install.ps1` (associations, shortcut, files, uninstall entry). |
 | `package-release.ps1` | Build a release ZIP containing the exe, installer scripts and a checksum file. |
+| `check-update.ps1` | Standalone version check for older installs; reads the latest release checksums and reports the installed/latest version. |
 
 ## gui-smoke.ps1
 

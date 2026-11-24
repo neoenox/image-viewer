@@ -41,7 +41,7 @@ $stage = Join-Path $outFull "stage-$Version"
 Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $stage | Out-Null
 
-foreach ($name in @('install.ps1', 'uninstall.ps1', 'associate.ps1', 'unassociate.ps1', 'open-default-apps.ps1')) {
+foreach ($name in @('install.ps1', 'uninstall.ps1', 'associate.ps1', 'unassociate.ps1', 'open-default-apps.ps1', 'check-update.ps1')) {
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination (Join-Path $stage $name) -Force
 }
 Copy-Item -LiteralPath $ExePath -Destination (Join-Path $stage 'image-viewer.exe') -Force
