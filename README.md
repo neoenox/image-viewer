@@ -45,13 +45,15 @@ measuring platform.
 
 ## Installing
 
-Download `image-viewer-installer-<version>-windows-x86_64.zip` from the
-GitHub Release, extract it, and run `install.ps1` from the extracted folder.
-The ZIP contains the exe and all association/uninstall scripts, so no
-repository checkout or Rust toolchain is needed. For a local build:
+Download `image-viewer-setup-<version>.exe` from the GitHub Release and run it.
+It is a native Rust installer with the application exe embedded; it does not
+invoke PowerShell. It copies the exe to `%LOCALAPPDATA%\Programs\ImageViewer`,
+creates a Start Menu shortcut, registers associations and adds an uninstall entry.
+
+The ZIP package `image-viewer-installer-<version>-windows-x86_64.zip` contains
+the same scripts for manual installation or repair:
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts\install.ps1 `
-  -ExePath target\release\image-viewer.exe
+powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
 It copies the exe to `%LOCALAPPDATA%\Programs\ImageViewer`, creates a Start
