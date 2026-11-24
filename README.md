@@ -137,6 +137,11 @@ read-only folder stays on its current version.
   GitHub issue form with that report prefilled. Nothing is submitted automatically,
   and full file paths are not included.
 
+For startup slowdown reports, set `IV_STARTUP_LOG=1` before launching. Timings
+for process start, pending update, app construction, settings load and first
+texture are appended to `%APPDATA%\image-viewer\startup.log`. With the variable
+unset, no timing file is written and no extra work is done.
+
 The image being opened, neighbour preloads, and original-size region decoding each
 run on their own background worker, so opening an image never waits behind a preload
 or a slow region decode (up to three full-size decodes can be in memory at once).
