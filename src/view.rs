@@ -127,6 +127,23 @@ impl eframe::App for ViewerApp {
                         );
                         self.interval_slider_id = Some(response.id);
                     }
+                    if self.is_animated() {
+                        let (label, tip) = if self.anim_paused {
+                            ("再生".to_owned(), "再生 (Space)")
+                        } else {
+                            ("一時停止".to_owned(), "一時停止 (Space)")
+                        };
+                        if ui.button(label).on_hover_text(tip).clicked() {
+                            self.toggle_animation_pause();
+                        }
+                        if ui
+                            .button("次フレーム")
+                            .on_hover_text("1フレーム進む (.)")
+                            .clicked()
+                        {
+                            self.step_animation(ctx);
+                        }
+                    }
                     let fs_tip = if self.fullscreen {
                         "全画面解除 (Esc)"
                     } else {
@@ -203,6 +220,10 @@ impl eframe::App for ViewerApp {
                     if self.slideshow {
                         ui.separator();
                         ui.label("再生中");
+                    }
+                    if self.anim_paused && self.is_animated() {
+                        ui.separator();
+                        ui.label("一時停止");
                     }
                     if self.is_animated() {
                         ui.separator();
@@ -619,7 +640,13 @@ impl ViewerApp {
                 } else {
                     ui.small("ホイール:拡大縮小 / ドラッグ:視点移動");
                 }
-                ui.small("← →:前後 / R:回転 / 0:フィット / F:全画面 / Space:再生");
+                if self.is_animated() {
+                    ui.small(
+                        "← →:前後 / R:回転 / 0:フィット / F:全画面 / Space:一時停止 / .:次フレーム",
+                    );
+                } else {
+                    ui.small("← →:前後 / R:回転 / 0:フィット / F:全画面 / Space:再生");
+                }
                 ui.small("+ / - (E/Q):拡大縮小 / T:一覧 / Tab:バー固定");
                 if self.settings_path.is_some() {
                     ui.small("設定は自動で保存され、次回の起動時にも使われます。");
@@ -1442,6 +1469,51 @@ mod tests {
             modifiers: egui::Modifiers::default(),
         });
         let _ = update_frame(app, ctx, raw);
+    }
+
+    #[test]
+    fn animated_viewer_exposes_pause_and_step_controls() {
+        use image::codecs::gif::{GifEncoder, Repeat};
+        let dir = std::env::temp_dir().join(format!("iv-step-ui-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("a.gif");
+        {
+            let mut encoder = GifEncoder::new(std::fs::File::create(&path).unwrap());
+            encoder.set_repeat(Repeat::Infinite).unwrap();
+            encoder
+                .encode_frame(image::Frame::from_parts(
+                    image::RgbaImage::from_pixel(2, 2, image::Rgba([1, 2, 3, 255])),
+                    0,
+                    0,
+                    image::Delay::from_numer_denom_ms(20, 1),
+                ))
+                .unwrap();
+        }
+        let ctx = headless_ctx();
+        let mut app = ViewerApp::new(None);
+        open(&mut app, &ctx, path);
+        let start = std::time::Instant::now();
+        while app.animation.is_none() {
+            app.poll_loading(&ctx);
+            assert!(start.elapsed() < std::time::Duration::from_secs(10));
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        app.anim_due = None;
+        app.toolbar_pinned = true;
+
+        send_key(&ctx, &mut app, egui::Key::Space);
+        assert!(app.anim_paused, "Space must pause an animated file");
+        let out = update_frame(&mut app, &ctx, raw_input(egui::vec2(800.0, 600.0), None));
+        assert!(shows(&out, "次フレーム"), "step control missing");
+        assert!(shows(&out, "一時停止"), "paused status missing");
+
+        drop(app);
+        for _ in 0..100 {
+            if std::fs::remove_dir_all(&dir).is_ok() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
     }
 
     #[test]

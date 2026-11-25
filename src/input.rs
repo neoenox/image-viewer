@@ -112,8 +112,15 @@ impl ViewerApp {
             self.show_stats = !self.show_stats;
         }
         if ctx.input(|i| i.key_pressed(egui::Key::Space)) {
-            self.slideshow = self.files.len() >= 2 && !self.slideshow;
-            self.last_advance = self.slideshow.then(Instant::now);
+            if self.is_animated() {
+                self.toggle_animation_pause();
+            } else {
+                self.slideshow = self.files.len() >= 2 && !self.slideshow;
+                self.last_advance = self.slideshow.then(Instant::now);
+            }
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::Period)) {
+            self.step_animation(ctx);
         }
         if open_key {
             self.open_dialog(ctx);
