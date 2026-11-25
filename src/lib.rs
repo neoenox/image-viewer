@@ -20,7 +20,6 @@ pub use app::{run, setup_jp_font, ViewerApp, PEEK_MAGNIFICATION, TOOLBAR_ICONS};
 mod update;
 pub use files::{collect_siblings, first_image_in_dir, is_supported, natural_cmp, SUPPORTED_EXTS};
 pub use imaging::decode_image;
-mod video;
 pub use loader::{CachedImage, ImageLoader};
 pub use update::check_updates_once;
 mod report;

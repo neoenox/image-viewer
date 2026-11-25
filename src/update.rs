@@ -3,14 +3,15 @@
 //! On startup a background worker reads the checksum file from the latest
 //! GitHub release. If it names a newer Windows exe, the worker downloads it to
 //! a temporary file, verifies its SHA-256 and stages it in the user's data
-//! directory. Nothing is shown in the UI. The *next* startup swaps the staged
-//! exe into place before the window is created, so a running viewer is never
-//! interrupted. A crash between the two renames is recovered on the next start
-//! by restoring the backup before retrying.
+//! directory. The status bar shows the current state (checking, up to date,
+//! staged, failed or off), so a silent check is still visible. The *next*
+//! startup swaps the staged exe into place before the window is created, so a
+//! running viewer is never interrupted. A crash between the two renames is
+//! recovered on the next start by restoring the backup before retrying.
 //!
 //! `--no-update` skips the background check. Successful checks are throttled
-//! to once per 24 hours. Outcomes (applied, staged or failed) are shown
-//! briefly in the status line and logged to `update/update.log`.
+//! to once per 24 hours. Outcomes are also shown briefly in the status line
+//! and logged to `update/update.log`.
 
 use std::cmp::Ordering;
 use std::fs::{self, File};
@@ -164,37 +165,69 @@ fn record_check(dir: &Path) {
 }
 
 /// Starts the release check off the UI thread and publishes its outcome.
-pub fn start_background_check_with_notice(version: &str, notice: Arc<Mutex<Option<String>>>) {
+pub fn start_background_check_with_notice(
+    version: &str,
+    notice: Arc<Mutex<Option<String>>>,
+    state: Arc<Mutex<Option<String>>>,
+) {
     #[cfg(windows)]
     {
         let version = version.to_owned();
+        let worker_state = state.clone();
+        publish_state(&state, "自動更新: 確認中...");
         if std::thread::Builder::new()
             .name("image-updater".to_owned())
             .spawn(move || {
-                if let Some(dir) = update_dir() {
-                    match check_and_stage(&version, &dir) {
-                        Ok(Some(new_version)) => {
-                            let message =
-                                format!("更新を準備しました: v{new_version}（次回起動で適用）");
-                            publish(&notice, message.clone());
-                            log_error(&dir, &message);
-                        }
-                        Ok(None) => {}
-                        Err(error) => {
-                            publish(&notice, format!("更新に失敗しました: {error}"));
-                            log_error(&dir, &error);
-                        }
-                    }
+                let Some(dir) = update_dir() else {
+                    publish_state(&worker_state, "自動更新: 設定が読めません");
+                    return;
+                };
+                let due = check_is_due(&dir);
+                let outcome = if due {
+                    check_and_stage(&version, &dir)
+                } else {
+                    Ok(None)
+                };
+                let (status, message) = update_outcome(due, outcome);
+                publish_state(&worker_state, &status);
+                if let Some(message) = message {
+                    publish(&notice, message);
                 }
             })
             .is_err()
         {
-            // A viewer with no update check is still a working viewer.
+            publish_state(&state, "自動更新: 開始できませんでした");
         }
     }
     #[cfg(not(windows))]
     {
-        let _ = (version, notice);
+        let _ = version;
+        publish_state(&state, "自動更新: Windowsのみ");
+    }
+}
+fn publish_state(state: &Arc<Mutex<Option<String>>>, message: impl Into<String>) {
+    let mut slot = state.lock().unwrap_or_else(|error| error.into_inner());
+    *slot = Some(message.into());
+}
+
+/// Map a check result to the persistent label and the one-shot status line.
+fn update_outcome(due: bool, result: Result<Option<String>, String>) -> (String, Option<String>) {
+    if !due {
+        return ("自動更新: 済み（次回は24時間後）".to_owned(), None);
+    }
+    match result {
+        Ok(Some(version)) => (
+            format!("自動更新: v{version} 準備済み"),
+            Some(format!("更新を準備しました: v{version}（次回起動で適用）")),
+        ),
+        Ok(None) => (
+            "自動更新: 最新です".to_owned(),
+            Some("更新は最新です".to_owned()),
+        ),
+        Err(error) => (
+            format!("自動更新: 失敗（{error}）"),
+            Some(format!("更新に失敗しました: {error}")),
+        ),
     }
 }
 fn publish(notice: &Arc<Mutex<Option<String>>>, message: String) {
@@ -515,6 +548,25 @@ mod tests {
         publish(&notice, "first".to_owned());
         publish(&notice, "second".to_owned());
         assert_eq!(notice.lock().unwrap().as_deref(), Some("second"));
+    }
+
+    #[test]
+    fn update_outcome_reports_every_state() {
+        let (status, message) = update_outcome(false, Ok(None));
+        assert!(status.contains("済み"));
+        assert!(message.is_none());
+
+        let (status, message) = update_outcome(true, Ok(None));
+        assert!(status.contains("最新"));
+        assert_eq!(message.as_deref(), Some("更新は最新です"));
+
+        let (status, message) = update_outcome(true, Ok(Some("9.9.9".to_owned())));
+        assert!(status.contains("9.9.9"));
+        assert!(message.unwrap().contains("9.9.9"));
+
+        let (status, message) = update_outcome(true, Err("接続できません".to_owned()));
+        assert!(status.contains("失敗"));
+        assert!(message.unwrap().contains("接続できません"));
     }
     #[test]
     #[cfg(windows)]

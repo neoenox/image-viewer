@@ -227,12 +227,7 @@ impl eframe::App for ViewerApp {
                     }
                     if self.is_animated() {
                         ui.separator();
-                        let label = if self.video.is_some() {
-                            "動画"
-                        } else {
-                            "アニメ"
-                        };
-                        ui.label(format!("{} #{}", label, self.anim_index() + 1));
+                        ui.label(format!("アニメ #{}", self.anim_index() + 1));
                     }
                 }
                 if self.loading {
@@ -247,6 +242,10 @@ impl eframe::App for ViewerApp {
                         "v{} · 上端:操作 / Tab:固定 / T:一覧",
                         env!("CARGO_PKG_VERSION")
                     ));
+                    if let Some(status) = self.update_status() {
+                        ui.separator();
+                        ui.label(status);
+                    }
                 });
             });
         });
@@ -1202,6 +1201,10 @@ mod tests {
         let out = update_frame(&mut app, &ctx, raw_input(egui::vec2(800.0, 600.0), None));
         assert!(shows(&out, "再生中"));
 
+        // 自動更新の状態は常時ステータスに出る（確認中／最新など）。
+        *app.update_state.lock().unwrap() = Some("自動更新: 最新です".to_owned());
+        let out = update_frame(&mut app, &ctx, raw_input(egui::vec2(800.0, 600.0), None));
+        assert!(shows(&out, "自動更新: 最新です"));
         std::fs::remove_dir_all(&dir).ok();
     }
 
