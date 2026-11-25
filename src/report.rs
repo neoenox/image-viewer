@@ -48,13 +48,16 @@ pub fn install_panic_hook() {
     }));
 }
 
-/// Return and consume a pending crash report.
-pub fn take_pending() -> Option<String> {
-    let dir = data_dir()?;
+fn take_pending_from(dir: &std::path::Path) -> Option<String> {
     let path = dir.join(CRASH_FILE);
     let text = std::fs::read_to_string(&path).ok()?;
     let _ = std::fs::remove_file(&path);
     Some(text)
+}
+
+/// Return and consume a pending crash report.
+pub fn take_pending() -> Option<String> {
+    data_dir().and_then(|dir| take_pending_from(&dir))
 }
 
 fn issue_url(report: &str) -> String {
@@ -123,13 +126,8 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(CRASH_FILE);
         std::fs::write(&path, "report").unwrap();
-        let read = |path: &std::path::Path| -> Option<String> {
-            let text = std::fs::read_to_string(path).ok()?;
-            let _ = std::fs::remove_file(path);
-            Some(text)
-        };
-        assert_eq!(read(&path).as_deref(), Some("report"));
-        assert!(read(&path).is_none());
+        assert_eq!(take_pending_from(&dir).as_deref(), Some("report"));
+        assert!(take_pending_from(&dir).is_none());
         std::fs::remove_dir_all(dir).unwrap();
     }
 

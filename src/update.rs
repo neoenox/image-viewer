@@ -197,7 +197,6 @@ pub fn start_background_check_with_notice(version: &str, notice: Arc<Mutex<Optio
         let _ = (version, notice);
     }
 }
-#[cfg(windows)]
 fn publish(notice: &Arc<Mutex<Option<String>>>, message: String) {
     let mut slot = notice.lock().unwrap_or_else(|error| error.into_inner());
     *slot = Some(message);
@@ -510,6 +509,13 @@ impl Sha256 {
 #[cfg(test)]
 mod tests {
 
+    #[test]
+    fn publish_stores_the_latest_notice() {
+        let notice = Arc::new(Mutex::new(None));
+        publish(&notice, "first".to_owned());
+        publish(&notice, "second".to_owned());
+        assert_eq!(notice.lock().unwrap().as_deref(), Some("second"));
+    }
     #[test]
     #[cfg(windows)]
     fn curl_program_prefers_the_system_copy() {
