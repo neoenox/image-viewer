@@ -146,6 +146,8 @@ pub struct ViewerApp {
     pub(crate) orig_dims: Option<(u32, u32)>,
     pub(crate) animation: Option<crate::animation::Animation>,
     pub(crate) anim_due: Option<Instant>,
+    /// アニメ/動画を停止し、`.` の1フレーム送りだけを受け付ける状態。
+    pub(crate) anim_paused: bool,
     pub(crate) anim_frame: usize,
     pub(crate) anim_total: usize,
     pub(crate) video: Option<crate::video::Video>,
@@ -244,6 +246,7 @@ impl ViewerApp {
             orig_dims: None,
             animation: None,
             anim_due: None,
+            anim_paused: false,
             anim_frame: 0,
             anim_total: 0,
             video: None,
@@ -368,6 +371,7 @@ impl ViewerApp {
         self.orig_dims = None;
         self.animation = None;
         self.anim_due = None;
+        self.anim_paused = false;
         self.anim_frame = 0;
         self.anim_total = 0;
         self.video = None;
@@ -530,44 +534,8 @@ impl ViewerApp {
             return;
         }
         self.retry_failed_load(ctx);
-        if self.anim_due.is_some_and(|due| Instant::now() >= due) {
-            if let Some(frame) = self.animation.as_mut().and_then(|a| a.poll()) {
-                match frame {
-                    Ok(frame) => {
-                        self.anim_frame = frame.index;
-                        self.anim_total = frame.total.unwrap_or(0).max(frame.index + 1);
-                        self.base = Some(std::sync::Arc::new(frame.rgba));
-                        self.anim_due = Some(Instant::now() + frame.delay);
-                        self.rebuild_texture(ctx);
-                    }
-                    Err(error) => {
-                        self.status_msg = format!("GIF再生エラー: {error}");
-                        self.animation = None;
-                        self.anim_due = None;
-                    }
-                }
-            } else if let Some(frame) = self.video.as_mut().and_then(|v| v.poll()) {
-                match frame {
-                    Ok(frame) => {
-                        let (w, h) = frame.rgba.dimensions();
-                        self.orig_dims = Some((w, h));
-                        self.anim_frame += 1;
-                        self.anim_total = self.anim_total.max(self.anim_frame);
-                        let color = egui::ColorImage::from_rgba_unmultiplied(
-                            [w as usize, h as usize],
-                            frame.rgba.as_raw(),
-                        );
-                        self.texture =
-                            Some(ctx.load_texture("video", color, egui::TextureOptions::LINEAR));
-                        self.anim_due = Some(Instant::now() + frame.delay);
-                    }
-                    Err(error) => {
-                        self.status_msg = format!("動画再生エラー: {error}");
-                        self.video = None;
-                        self.anim_due = None;
-                    }
-                }
-            }
+        if !self.anim_paused && self.anim_due.is_some_and(|due| Instant::now() >= due) {
+            self.advance_animation(ctx);
         }
         if let Some(result) = self.loader.poll_detail() {
             match result {
@@ -645,6 +613,68 @@ impl ViewerApp {
             || self.upscale_pending.is_some()
         {
             ctx.request_repaint_after(Duration::from_millis(16));
+        }
+    }
+
+    /// Space: アニメ/動画の再生と一時停止を切り替える。
+    pub(crate) fn toggle_animation_pause(&mut self) {
+        if !self.is_animated() {
+            return;
+        }
+        self.anim_paused = !self.anim_paused;
+        if !self.anim_paused {
+            self.anim_due = Some(Instant::now());
+        }
+    }
+
+    /// `.`: 一時停止中に1フレームだけ進める。再生中なら停止してから進める。
+    pub(crate) fn step_animation(&mut self, ctx: &egui::Context) {
+        if !self.is_animated() {
+            return;
+        }
+        self.anim_paused = true;
+        self.anim_due = Some(Instant::now());
+        self.advance_animation(ctx);
+        ctx.request_repaint();
+    }
+
+    fn advance_animation(&mut self, ctx: &egui::Context) {
+        if let Some(frame) = self.animation.as_mut().and_then(|a| a.poll()) {
+            match frame {
+                Ok(frame) => {
+                    self.anim_frame = frame.index;
+                    self.anim_total = frame.total.unwrap_or(0).max(frame.index + 1);
+                    self.base = Some(std::sync::Arc::new(frame.rgba));
+                    self.anim_due = Some(Instant::now() + frame.delay);
+                    self.rebuild_texture(ctx);
+                }
+                Err(error) => {
+                    self.status_msg = format!("GIF再生エラー: {error}");
+                    self.animation = None;
+                    self.anim_due = None;
+                }
+            }
+        } else if let Some(frame) = self.video.as_mut().and_then(|v| v.poll()) {
+            match frame {
+                Ok(frame) => {
+                    let (w, h) = frame.rgba.dimensions();
+                    self.orig_dims = Some((w, h));
+                    self.anim_frame += 1;
+                    self.anim_total = self.anim_total.max(self.anim_frame);
+                    let color = egui::ColorImage::from_rgba_unmultiplied(
+                        [w as usize, h as usize],
+                        frame.rgba.as_raw(),
+                    );
+                    self.texture =
+                        Some(ctx.load_texture("video", color, egui::TextureOptions::LINEAR));
+                    self.anim_due = Some(Instant::now() + frame.delay);
+                }
+                Err(error) => {
+                    self.status_msg = format!("動画再生エラー: {error}");
+                    self.video = None;
+                    self.anim_due = None;
+                }
+            }
         }
     }
     pub fn is_loading(&self) -> bool {
@@ -2270,5 +2300,71 @@ mod tests {
         assert_eq!(app.display_image_size(), Some(egui::vec2(1.0, 1.0)));
         drop(app);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn paused_animation_only_advances_on_step() {
+        use image::codecs::gif::{GifEncoder, Repeat};
+        let dir = std::env::temp_dir().join(format!("iv-step-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("a.gif");
+        {
+            let mut encoder = GifEncoder::new(std::fs::File::create(&path).unwrap());
+            encoder.set_repeat(Repeat::Infinite).unwrap();
+            for value in [1u8, 2, 3] {
+                encoder
+                    .encode_frame(image::Frame::from_parts(
+                        image::RgbaImage::from_pixel(2, 2, image::Rgba([value, value, value, 255])),
+                        0,
+                        0,
+                        image::Delay::from_numer_denom_ms(20, 1),
+                    ))
+                    .unwrap();
+            }
+        }
+        let ctx = egui::Context::default();
+        let mut app = ViewerApp::new(None);
+        app.files = vec![path.clone()];
+        app.current_mtime = crate::loader::modified_time(&path);
+        app.animation = Some(crate::animation::Animation::new(path.clone(), 2048));
+        app.anim_due = Some(Instant::now());
+        let start = Instant::now();
+        while app.anim_frame < 1 {
+            app.poll_loading(&ctx);
+            assert!(
+                start.elapsed() < Duration::from_secs(10),
+                "GIF worker never presented its second frame"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(app.anim_frame, 1);
+
+        app.toggle_animation_pause();
+        assert!(app.anim_paused);
+        app.anim_due = Some(Instant::now());
+        app.poll_loading(&ctx);
+        assert_eq!(app.anim_frame, 1, "paused playback advanced on its own");
+
+        let start = Instant::now();
+        while app.anim_frame < 2 {
+            app.step_animation(&ctx);
+            assert!(
+                start.elapsed() < Duration::from_secs(10),
+                "step did not present the next frame"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(app.anim_paused, "step resumed playback");
+        app.toggle_animation_pause();
+        assert!(!app.anim_paused);
+        assert!(app.anim_due.is_some(), "resume must schedule a frame");
+
+        drop(app);
+        for _ in 0..100 {
+            if std::fs::remove_dir_all(&dir).is_ok() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
     }
 }

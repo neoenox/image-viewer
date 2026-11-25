@@ -122,10 +122,12 @@ read-only folder stays on its current version.
 - Move to the top edge to reveal controls. Tab pins/unpins the toolbar.
 - T opens the thumbnail list. Click a thumbnail or filename to select it.
 - Arrow keys (or A / D): previous/next; Home / End: first/last; + / - (or E / Q): zoom; 0: fit;
-  R / Shift+R: rotate; F / F11: fullscreen; Space: slideshow; Ctrl+O: open; Esc: leave fullscreen or stop the slideshow.
+  R / Shift+R: rotate; F / F11: fullscreen; Space: slideshow or pause/resume an animated
+  GIF/video; `.`: advance one animation frame; Ctrl+O: open; Esc: leave fullscreen or stop the slideshow.
 - Videos (MP4, M4V, MOV, AVI, WMV, WebM): play through Windows Media Foundation
   (video only, no audio; plays once). Codec support depends on Windows.
   Frames use the same size cap as images and appear in the status bar with a frame counter.
+  Space pauses playback and `.` (or the toolbar's "次フレーム") shows the next frame.
 - F12 shows the display-latency overlay (see [Latency benchmark](#latency-benchmark)); it can also be
   enabled at startup with `image-viewer.exe --stats`.
 - Photos open upright: the EXIF orientation that cameras and phones record (JPEG, PNG,
