@@ -45,7 +45,7 @@ measuring platform.
 
 ## Installing
 
-Download `image-viewer-setup-<version>.exe` from the GitHub Release and run it.
+Download `image-viewer-installer-<version>.exe` from the GitHub Release and run it.
 It is a native Rust installer with the application exe embedded; it does not
 invoke PowerShell. It copies the exe to `%LOCALAPPDATA%\Programs\ImageViewer`,
 creates a Start Menu shortcut, registers associations and adds an uninstall entry.
