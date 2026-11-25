@@ -640,7 +640,13 @@ impl ViewerApp {
                 } else {
                     ui.small("ホイール:拡大縮小 / ドラッグ:視点移動");
                 }
-                ui.small("← →:前後 / R:回転 / 0:フィット / F:全画面 / Space:再生");
+                if self.is_animated() {
+                    ui.small(
+                        "← →:前後 / R:回転 / 0:フィット / F:全画面 / Space:一時停止 / .:次フレーム",
+                    );
+                } else {
+                    ui.small("← →:前後 / R:回転 / 0:フィット / F:全画面 / Space:再生");
+                }
                 ui.small("+ / - (E/Q):拡大縮小 / T:一覧 / Tab:バー固定");
                 if self.settings_path.is_some() {
                     ui.small("設定は自動で保存され、次回の起動時にも使われます。");
