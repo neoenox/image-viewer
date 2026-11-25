@@ -91,16 +91,15 @@ in the exe's file properties.
 
 ## Automatic updates
 
-On startup the viewer quietly checks the latest GitHub release for a newer
-Windows exe. It reads `SHA256SUMS.txt` over HTTPS, downloads the matching exe,
-verifies its SHA-256 and stages it under `%APPDATA%\image-viewer\update`. No
-dialog is shown. At the next
-launch the staged exe replaces the running one before the window opens; a
-crash between the two renames is repaired on the next launch by restoring the
-backup before retrying. Corrupt staged files are discarded. The viewer
-deliberately does not restart itself, so no running session is ever interrupted.
-When an update is staged, applied or fails, the status line shows the outcome
-for ten seconds instead of leaving it completely silent.
+On startup the viewer checks the latest GitHub release for a newer Windows exe.
+It reads `SHA256SUMS.txt` over HTTPS, downloads the matching exe, verifies its
+SHA-256 and stages it under `%APPDATA%\image-viewer\update`. At the next launch
+the staged exe replaces the running one before the window opens; a crash between
+the two renames is repaired on the next launch by restoring the backup before
+retrying. Corrupt staged files are discarded. The viewer deliberately does not
+restart itself, so no running session is ever interrupted. The status bar always
+shows the current state — checking, up to date, staged, failed or off — so the
+background check is visible even when nothing needs downloading.
 
 The check uses the Windows-supplied `curl.exe`, so no extra runtime is needed,
 and is throttled to once per 24 hours after a successful check. Clear the
@@ -122,12 +121,9 @@ read-only folder stays on its current version.
 - Move to the top edge to reveal controls. Tab pins/unpins the toolbar.
 - T opens the thumbnail list. Click a thumbnail or filename to select it.
 - Arrow keys (or A / D): previous/next; Home / End: first/last; + / - (or E / Q): zoom; 0: fit;
-  R / Shift+R: rotate; F / F11: fullscreen; Space: slideshow or pause/resume an animated
-  GIF/video; `.`: advance one animation frame; Ctrl+O: open; Esc: leave fullscreen or stop the slideshow.
-- Videos (MP4, M4V, MOV, AVI, WMV, WebM): play through Windows Media Foundation
-  (video only, no audio; plays once). Codec support depends on Windows.
-  Frames use the same size cap as images and appear in the status bar with a frame counter.
-  Space pauses playback and `.` (or the toolbar's "次フレーム") shows the next frame.
+  R / Shift+R: rotate; F / F11: fullscreen; Space: slideshow or pause/resume a GIF;
+  `.`: advance one GIF frame; Ctrl+O: open; Esc: leave fullscreen or stop the slideshow.
+- Videos (MP4, M4V, MOV, AVI, WMV, WebM) are not loaded; opening one shows an error.
 - F12 shows the display-latency overlay (see [Latency benchmark](#latency-benchmark)); it can also be
   enabled at startup with `image-viewer.exe --stats`.
 - Photos open upright: the EXIF orientation that cameras and phones record (JPEG, PNG,
@@ -145,9 +141,6 @@ for process start, pending update, app construction, settings load and first
 texture are appended to `%APPDATA%\image-viewer\startup.log`. With the variable
 unset, no timing file is written and no extra work is done.
 
-For video playback reports, set `IV_VIDEO_LOG=1` to log decoded frame timing to
-`%APPDATA%\image-viewer\video.log`. Frames are capped at 2048 px and excess
-frames are dropped when the UI falls behind, so playback stays real-time.
 
 The image being opened, neighbour preloads, and original-size region decoding each
 run on their own background worker, so opening an image never waits behind a preload
@@ -230,8 +223,7 @@ blocker.
 - `sync.rs`: lock helpers that survive a poisoned mutex; panic-safe worker decoding.
 - `win_icon.rs`: window/taskbar icon applied via Win32 (keeps eframe's icon code out of the exe).
 - `assoc.rs`: Windows file association registration and restoration.
-- `update.rs`: silent, checksum-verified release check, staging and next-launch exe swap.
-- `video.rs`: bounded Media Foundation frame decoding for MP4 files.
+- `update.rs`: checksum-verified release check, staging, next-launch exe swap and visible status.
 - `report.rs`: panic hook, local crash report and prefilled GitHub issue URL.
 
 The implementation plan and acceptance criteria are in

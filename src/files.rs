@@ -2,10 +2,8 @@ use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
 pub const SUPPORTED_EXTS: &[&str] = &[
     "jpg", "jpeg", "png", "gif", "bmp", "webp", "tif", "tiff", "ico", "dds", "hdr", "exr", "qoi",
-    "pbm", "pgm", "ppm", "pam", "mp4", "m4v", "mov", "avi", "wmv", "webm",
+    "pbm", "pgm", "ppm", "pam",
 ];
-
-const VIDEO_EXTS: &[&str] = &["mp4", "m4v", "mov", "avi", "wmv", "webm"];
 
 pub fn is_supported(path: &Path) -> bool {
     path.extension()
@@ -14,7 +12,8 @@ pub fn is_supported(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Videos use the Media Foundation frame source instead of the image loader.
+/// Recognize video file names so opening one reports an explicit error instead
+/// of sending it to the still-image decoder.
 pub(crate) fn is_video(path: &Path) -> bool {
     path.extension()
         .and_then(|ext| ext.to_str())
@@ -163,7 +162,7 @@ mod performance_regression_tests {
     use super::*;
 
     #[test]
-    fn video_formats_are_supported_and_routed_to_video() {
+    fn video_files_are_not_supported_images() {
         for name in [
             "clip.MP4",
             "clip.m4v",
@@ -173,8 +172,8 @@ mod performance_regression_tests {
             "clip.webm",
         ] {
             let path = Path::new(name);
-            assert!(is_supported(path), "{name} should be supported");
-            assert!(is_video(path), "{name} should use the video source");
+            assert!(!is_supported(path), "{name} must not be opened as an image");
+            assert!(is_video(path), "{name} must be recognized for the error");
         }
         assert!(!is_video(Path::new("photo.png")));
     }

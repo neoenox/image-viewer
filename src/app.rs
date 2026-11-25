@@ -133,6 +133,8 @@ pub struct ViewerApp {
     pub(crate) interval_slider_id: Option<egui::Id>,
     /// Outcomes published by the background updater (staged / failed).
     pub(crate) update_notice: Arc<Mutex<Option<String>>>,
+    /// Persistent status-bar label for the background updater.
+    pub(crate) update_state: Arc<Mutex<Option<String>>>,
     /// Process start time for optional startup diagnostics.
     pub(crate) startup_at: Instant,
     pub(crate) pan_offset: egui::Vec2,
@@ -146,11 +148,10 @@ pub struct ViewerApp {
     pub(crate) orig_dims: Option<(u32, u32)>,
     pub(crate) animation: Option<crate::animation::Animation>,
     pub(crate) anim_due: Option<Instant>,
-    /// アニメ/動画を停止し、`.` の1フレーム送りだけを受け付ける状態。
+    /// GIFアニメを停止し、`.` の1フレーム送りだけを受け付ける状態。
     pub(crate) anim_paused: bool,
     pub(crate) anim_frame: usize,
     pub(crate) anim_total: usize,
-    pub(crate) video: Option<crate::video::Video>,
     pub(crate) generation: u64,
     pub(crate) loading: bool,
     pub(crate) detail_pending: bool,
@@ -233,6 +234,7 @@ impl ViewerApp {
             thumb_panel_open: false,
             interval_slider_id: None,
             update_notice: Arc::new(Mutex::new(None)),
+            update_state: Arc::new(Mutex::new(None)),
             current_mtime: None,
             last_mtime_check: None,
             pan_offset: egui::Vec2::ZERO,
@@ -249,7 +251,6 @@ impl ViewerApp {
             anim_paused: false,
             anim_frame: 0,
             anim_total: 0,
-            video: None,
             generation: 0,
             startup_at: Instant::now(),
             loading: false,
@@ -299,9 +300,6 @@ impl ViewerApp {
 
     pub(crate) fn rebuild_texture(&mut self, ctx: &egui::Context) {
         // GPU上限は環境で変わり得るため都度取得
-        if self.video.is_some() {
-            return;
-        }
         self.tex_cap = ctx.input(|i| i.max_texture_side).max(512);
         if self.base.is_some() && self.base_cap != self.tex_cap {
             self.load_current(None);
@@ -374,7 +372,6 @@ impl ViewerApp {
         self.anim_paused = false;
         self.anim_frame = 0;
         self.anim_total = 0;
-        self.video = None;
         self.peek_saved = None;
         self.pan_offset = egui::Vec2::ZERO;
         self.wheel_accum = 0.0;
@@ -391,14 +388,10 @@ impl ViewerApp {
         );
         self.last_mtime_check = Some(Instant::now());
         if is_video(&path) {
-            self.video = Some(crate::video::Video::new(path, self.tex_cap));
-            self.anim_due = Some(Instant::now());
-            self.orig_dims = Some((1, 1));
-            if let Some(ctx) = ctx {
-                let color = egui::ColorImage::new([1, 1], vec![egui::Color32::TRANSPARENT]);
-                self.texture = Some(ctx.load_texture("video", color, egui::TextureOptions::LINEAR));
-                ctx.request_repaint();
-            }
+            self.load_error = Some("動画は読み込めません（画像ファイルのみ対応）".to_owned());
+            self.texture = None;
+            self.base = None;
+            self.orig_dims = None;
             return;
         }
         self.loading = true;
@@ -616,7 +609,7 @@ impl ViewerApp {
         }
     }
 
-    /// Space: アニメ/動画の再生と一時停止を切り替える。
+    /// Space: GIFアニメの再生と一時停止を切り替える。
     pub(crate) fn toggle_animation_pause(&mut self) {
         if !self.is_animated() {
             return;
@@ -654,31 +647,18 @@ impl ViewerApp {
                     self.anim_due = None;
                 }
             }
-        } else if let Some(frame) = self.video.as_mut().and_then(|v| v.poll()) {
-            match frame {
-                Ok(frame) => {
-                    let (w, h) = frame.rgba.dimensions();
-                    self.orig_dims = Some((w, h));
-                    self.anim_frame += 1;
-                    self.anim_total = self.anim_total.max(self.anim_frame);
-                    let color = egui::ColorImage::from_rgba_unmultiplied(
-                        [w as usize, h as usize],
-                        frame.rgba.as_raw(),
-                    );
-                    self.texture =
-                        Some(ctx.load_texture("video", color, egui::TextureOptions::LINEAR));
-                    self.anim_due = Some(Instant::now() + frame.delay);
-                }
-                Err(error) => {
-                    self.status_msg = format!("動画再生エラー: {error}");
-                    self.video = None;
-                    self.anim_due = None;
-                }
-            }
         }
     }
     pub fn is_loading(&self) -> bool {
         self.loading
+    }
+
+    /// Persistent label shown in the status bar for the background updater.
+    pub(crate) fn update_status(&self) -> Option<String> {
+        self.update_state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
     }
 
     /// 前後画像の先読みを要求し、遠い画像をキャッシュから捨てる。
@@ -921,7 +901,7 @@ impl ViewerApp {
         self.texture.as_ref().map(|t| t.size())
     }
     pub fn is_animated(&self) -> bool {
-        self.animation.is_some() || self.video.is_some()
+        self.animation.is_some()
     }
     /// Total is learned when the first loop completes; until then it is the observed count.
     pub fn frame_count(&self) -> usize {
@@ -1263,17 +1243,27 @@ pub fn run() -> eframe::Result<()> {
     startup_log("run begin", started);
     let applied = crate::update::apply_pending();
     let notice = Arc::new(Mutex::new(None));
+    let update_state = Arc::new(Mutex::new(None));
     startup_log("pending update applied", started);
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     let no_update = no_update_requested(args.iter().cloned());
     let (initial, stats) = parse_launch_args(args);
     let mut app = ViewerApp::new(initial);
     app.update_notice = notice.clone();
+    app.update_state = update_state.clone();
     startup_log("app constructed", started);
     match applied {
-        Ok(Some(version)) => app.show_update_message(format!("更新を適用しました: v{version}")),
+        Ok(Some(version)) => {
+            let message = format!("更新を適用しました: v{version}");
+            *update_state.lock().unwrap_or_else(|e| e.into_inner()) = Some(message.clone());
+            app.show_update_message(message);
+        }
         Ok(None) => {}
-        Err(error) => app.show_update_message(format!("更新の適用に失敗しました: {error}")),
+        Err(error) => {
+            let message = format!("更新の適用に失敗しました: {error}");
+            *update_state.lock().unwrap_or_else(|e| e.into_inner()) = Some(message.clone());
+            app.show_update_message(message);
+        }
     }
     // F12 と同じオーバーレイを起動時から出す（ショートカット起動用）。
     app.show_stats = stats;
@@ -2288,17 +2278,21 @@ mod tests {
     }
 
     #[test]
-    fn video_selection_has_valid_placeholder_dimensions() {
-        let dir = std::env::temp_dir().join(format!("iv-video-dims-{}", std::process::id()));
+    fn video_files_are_rejected_without_a_player() {
+        let dir = std::env::temp_dir().join(format!("iv-video-reject-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("clip.mp4");
-        std::fs::write(&path, b"not a real video").unwrap();
+        std::fs::write(&path, b"not an image").unwrap();
         let ctx = egui::Context::default();
         let mut app = ViewerApp::new(None);
         app.open_path(path, Some(&ctx));
-        assert!(app.video.is_some());
-        assert_eq!(app.display_image_size(), Some(egui::vec2(1.0, 1.0)));
-        drop(app);
+        assert!(
+            app.load_error()
+                .is_some_and(|error| error.contains("動画は読み込めません")),
+            "video must be rejected with a clear message"
+        );
+        assert!(!app.has_texture());
+        assert!(!app.is_animated());
         std::fs::remove_dir_all(dir).unwrap();
     }
 
