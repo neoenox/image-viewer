@@ -306,6 +306,12 @@ unsafe fn decode_inner(
             rgba: image,
             delay: sample_delay.clamp(Duration::from_millis(5), Duration::from_secs(1)),
         };
+        if index % 30 == 0 {
+            video_log(&format!(
+                "frame {index}: {} ms",
+                started.elapsed().as_millis()
+            ));
+        }
         if !send(tx, stop, Ok(frame)) {
             break;
         }
