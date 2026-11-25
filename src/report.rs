@@ -133,10 +133,10 @@ mod tests {
 
     #[test]
     fn issue_url_is_prefilled_without_sending_data() {
-        let url = issue_url("panic: mp4");
+        let url = issue_url("panic: png");
         assert!(url.starts_with(ISSUE_URL));
         assert!(url.contains("labels=bug"));
         assert!(url.contains("title=crash%3A%20v"));
-        assert!(url.contains("panic%3A%20mp4"));
+        assert!(url.contains("panic%3A%20png"));
     }
 }

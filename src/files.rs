@@ -19,7 +19,7 @@ pub(crate) fn is_video(path: &Path) -> bool {
         .and_then(|ext| ext.to_str())
         .is_some_and(|ext| {
             let ext = ext.to_ascii_lowercase();
-            VIDEO_EXTS.contains(&ext.as_str())
+            matches!(ext.as_str(), "mp4" | "m4v" | "mov" | "avi" | "wmv" | "webm")
         })
 }
 

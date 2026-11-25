@@ -1277,7 +1277,13 @@ pub fn run() -> eframe::Result<()> {
         crate::report::open_issue(&report);
     }
     if app.settings.auto_update && !no_update {
-        crate::update::start_background_check_with_notice(env!("CARGO_PKG_VERSION"), notice);
+        crate::update::start_background_check_with_notice(
+            env!("CARGO_PKG_VERSION"),
+            notice,
+            update_state,
+        );
+    } else {
+        *update_state.lock().unwrap_or_else(|e| e.into_inner()) = Some("自動更新: オフ".to_owned());
     }
     // 前回のウィンドウ状態（サイズ・位置・最大化）で開く。
     // 復元OFF・初回・不正値は既定ジオメトリ（詳細は window_state を参照）。
