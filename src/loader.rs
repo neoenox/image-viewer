@@ -554,6 +554,7 @@ mod tests {
         );
         assert!(!state.is_failed(&key));
     }
+
     #[test]
     fn join_within_deadline_detaches_a_worker_stuck_past_the_deadline() {
         use std::sync::atomic::{AtomicBool, Ordering};

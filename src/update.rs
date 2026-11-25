@@ -197,7 +197,6 @@ pub fn start_background_check_with_notice(version: &str, notice: Arc<Mutex<Optio
         let _ = (version, notice);
     }
 }
-#[cfg(windows)]
 fn publish(notice: &Arc<Mutex<Option<String>>>, message: String) {
     let mut slot = notice.lock().unwrap_or_else(|error| error.into_inner());
     *slot = Some(message);

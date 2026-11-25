@@ -374,4 +374,13 @@ mod tests {
         assert!(rx.try_recv().is_ok());
         assert!(rx.try_recv().is_err());
     }
+
+    #[test]
+    fn send_detects_a_disconnected_receiver() {
+        let (tx, rx) = mpsc::sync_channel(2);
+        drop(rx);
+        let stop = AtomicBool::new(false);
+        assert!(!send(&tx, &stop, frame()));
+        assert!(!send(&tx, &stop, Err("boom".to_owned())));
+    }
 }
