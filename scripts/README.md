@@ -13,22 +13,23 @@ these ship in the exe; they are developer and CI helpers.
 | `open-default-apps.ps1` | Open Settings > Default apps to finish association in the UI. Run `associate.ps1` first. |
 | `install.ps1` | Per-user install: copy exe to `%LOCALAPPDATA%\Programs\ImageViewer`, create a shortcut, register associations/uninstall entry, then run `--check-update` to stage updates silently. |
 | `uninstall.ps1` | Undo `install.ps1` (associations, shortcut, files, uninstall entry). |
-| `package-release.ps1` | Build `image-viewer-tools-<version>.zip` with the exe, manual install scripts and checksums. The GUI setup exe is a separate embedded binary. |
-| `check-update.ps1` | Standalone version check for older installs; reads the latest release checksums and reports the installed/latest version. |
+| `package-release.ps1` | Build `image-viewer-tools-<version>.zip` with the exe and manual install scripts. |
+| `build-installer.ps1` | Compile `installer/image-viewer.iss` with Inno Setup 6 into `image-viewer-installer-<version>.exe`. |
 
 
-## Building the native setup exe
+## Building the installer
 
-The release `image-viewer-setup-<version>.exe` is built from
-`src/bin/installer.rs` with the application exe embedded. Copy the release exe
-to `target/installer-payload.exe`, then run:
+Inno Setup 6 is required (`ISCC.exe`, auto-detected in the usual install
+locations or passed with `-CompilerPath`). Build the application first, then:
 
 ```powershell
-cargo build --release --features installer --bin image-viewer-setup
+cargo build --release --locked
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build-installer.ps1
 ```
 
-This produces `target/release/image-viewer-setup.exe`. No PowerShell is invoked
-when the resulting installer runs.
+This produces `dist\image-viewer-installer-<version>.exe`. The installer is a
+normal Japanese-language wizard with an uninstall entry; it does not depend on
+PowerShell at runtime.
 
 ## gui-smoke.ps1
 
