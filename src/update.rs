@@ -511,6 +511,13 @@ impl Sha256 {
 mod tests {
 
     #[test]
+    fn publish_stores_the_latest_notice() {
+        let notice = Arc::new(Mutex::new(None));
+        publish(&notice, "first".to_owned());
+        publish(&notice, "second".to_owned());
+        assert_eq!(notice.lock().unwrap().as_deref(), Some("second"));
+    }
+    #[test]
     #[cfg(windows)]
     fn curl_program_prefers_the_system_copy() {
         let root = std::env::var_os("SystemRoot")
