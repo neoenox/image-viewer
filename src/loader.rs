@@ -556,6 +556,49 @@ mod tests {
     }
 
     #[test]
+    fn in_flight_counts_and_releases_each_marker() {
+        let mut state = State::default();
+        let key = (PathBuf::from("a.png"), 128);
+        assert_eq!(state.in_flight(&key), 0);
+        state.active.push(key.clone());
+        state.active.push(key.clone());
+        assert_eq!(state.in_flight(&key), 2);
+        state.finish(&key);
+        assert_eq!(state.in_flight(&key), 1);
+        state.finish(&key);
+        assert_eq!(state.in_flight(&key), 0);
+    }
+
+    #[test]
+    fn touch_moves_cached_key_to_the_back() {
+        let mut state = State::default();
+        let first = (PathBuf::from("a.png"), 128);
+        let second = (PathBuf::from("b.png"), 128);
+        for key in [first.clone(), second.clone()] {
+            state.insert(
+                key,
+                CachedImage {
+                    rgba: Arc::new(image::RgbaImage::new(2, 2)),
+                    orig: (2, 2),
+                    gif: false,
+                },
+            );
+        }
+        state.touch(&first);
+        assert_eq!(state.order.back(), Some(&first));
+    }
+
+    #[test]
+    fn failure_marker_expires() {
+        let mut state = State::default();
+        let key = (PathBuf::from("a.png"), 128);
+        state.failed.insert(
+            key.clone(),
+            Instant::now() - FAILED_RETRY - Duration::from_secs(1),
+        );
+        assert!(!state.is_failed(&key));
+    }
+    #[test]
     fn join_within_deadline_detaches_a_worker_stuck_past_the_deadline() {
         use std::sync::atomic::{AtomicBool, Ordering};
         let release = Arc::new(AtomicBool::new(false));
