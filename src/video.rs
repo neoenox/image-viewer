@@ -289,7 +289,12 @@ unsafe fn decode_inner(
                 };
                 let source = &bytes[source_row..source_row + row_bytes];
                 let dest = &mut rgba[y * row_bytes..(y + 1) * row_bytes];
-                for (src, dst) in source.chunks_exact(4).zip(dest.chunks_exact_mut(4)) {
+                for (src, dst) in source
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .zip(dest.as_chunks_mut::<4>().0.iter_mut())
+                {
                     // MF RGB32 is BGRA in memory.
                     dst[0] = src[2];
                     dst[1] = src[1];
@@ -306,7 +311,7 @@ unsafe fn decode_inner(
             rgba: image,
             delay: sample_delay.clamp(Duration::from_millis(5), Duration::from_secs(1)),
         };
-        if index % 30 == 0 {
+        if index.is_multiple_of(30) {
             video_log(&format!(
                 "frame {index}: {} ms",
                 started.elapsed().as_millis()
@@ -341,5 +346,32 @@ mod tests {
         };
         assert!(!error.is_empty());
         assert!(matches!(video.poll(), Some(Err(_))));
+    }
+
+    fn frame() -> Result<VideoFrame, String> {
+        Ok(VideoFrame {
+            rgba: image::RgbaImage::new(1, 1),
+            delay: Duration::ZERO,
+        })
+    }
+
+    #[test]
+    fn send_stops_when_cancelled() {
+        let (tx, rx) = mpsc::sync_channel(2);
+        let stop = AtomicBool::new(true);
+        assert!(!send(&tx, &stop, frame()));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn send_drops_excess_frames_without_blocking() {
+        let (tx, rx) = mpsc::sync_channel(2);
+        let stop = AtomicBool::new(false);
+        for _ in 0..3 {
+            assert!(send(&tx, &stop, frame()));
+        }
+        assert!(rx.try_recv().is_ok());
+        assert!(rx.try_recv().is_ok());
+        assert!(rx.try_recv().is_err());
     }
 }
