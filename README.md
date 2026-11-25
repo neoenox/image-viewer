@@ -143,6 +143,10 @@ for process start, pending update, app construction, settings load and first
 texture are appended to `%APPDATA%\image-viewer\startup.log`. With the variable
 unset, no timing file is written and no extra work is done.
 
+For video playback reports, set `IV_VIDEO_LOG=1` to log decoded frame timing to
+`%APPDATA%\image-viewer\video.log`. Frames are capped at 2048 px and excess
+frames are dropped when the UI falls behind, so playback stays real-time.
+
 The image being opened, neighbour preloads, and original-size region decoding each
 run on their own background worker, so opening an image never waits behind a preload
 or a slow region decode (up to three full-size decodes can be in memory at once).

@@ -89,7 +89,32 @@ fn send(
     if stop.load(Ordering::Relaxed) {
         return false;
     }
-    tx.send(frame).is_ok()
+    match frame {
+        Ok(frame) => match tx.try_send(Ok(frame)) {
+            Ok(()) | Err(mpsc::TrySendError::Full(_)) => true,
+            Err(mpsc::TrySendError::Disconnected(_)) => false,
+        },
+        Err(error) => tx.send(Err(error)).is_ok(),
+    }
+}
+
+fn video_log(message: &str) {
+    if std::env::var_os("IV_VIDEO_LOG").is_none() {
+        return;
+    }
+    let Some(path) = crate::settings::ViewerSettings::default_path()
+        .and_then(|p| p.parent().map(|dir| dir.join("video.log")))
+    else {
+        return;
+    };
+    use std::io::Write;
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(file, "{message}");
+    }
 }
 
 #[cfg(windows)]
@@ -178,6 +203,8 @@ unsafe fn decode_inner(
     let mut stride = 0isize;
     let mut delay = Duration::from_millis(33);
 
+    let started = std::time::Instant::now();
+    let mut index = 0usize;
     while !stop.load(Ordering::Relaxed) {
         let mut flags = 0u32;
         let mut sample = None;
@@ -235,45 +262,46 @@ unsafe fn decode_inner(
         let len = buffer
             .GetCurrentLength()
             .map_err(|e| format!("buffer length: {e}"))? as usize;
+        let row_bytes = width as usize * 4;
+        let needed = row_bytes * height as usize;
+        let step = stride.unsigned_abs();
+        if step.checked_mul(height as usize).is_none_or(|n| n > len) || len < needed {
+            return Err("short video frame".to_owned());
+        }
         let mut ptr = std::ptr::null_mut();
         buffer
             .Lock(&mut ptr, None, None)
             .map_err(|e| format!("buffer lock: {e}"))?;
-        let bytes = if ptr.is_null() {
+        if ptr.is_null() {
             buffer.Unlock().ok();
             return Err("empty video buffer".to_owned());
-        } else {
-            let all = slice::from_raw_parts(ptr, len).to_vec();
-            buffer.Unlock().ok();
-            all
-        };
-        let row_bytes = width as usize * 4;
-        let needed = row_bytes * height as usize;
-        if bytes.len() < needed {
-            return Err("short video frame".to_owned());
         }
         let mut rgba = vec![0u8; needed];
-        let top_down = stride >= 0;
-        let step = stride.unsigned_abs();
-        for y in 0..height as usize {
-            let source_row = if top_down {
-                y * step
-            } else {
-                (height as usize - 1 - y) * step
-            };
-            for x in 0..width as usize {
-                let src = source_row + x * 4;
-                let dst = (y * width as usize + x) * 4;
-                // MF RGB32 is BGRA in memory.
-                rgba[dst] = bytes[src + 2];
-                rgba[dst + 1] = bytes[src + 1];
-                rgba[dst + 2] = bytes[src];
-                rgba[dst + 3] = 255;
+        {
+            // Convert directly from the locked buffer; no full-frame copy.
+            let bytes = slice::from_raw_parts(ptr, len);
+            let top_down = stride >= 0;
+            for y in 0..height as usize {
+                let source_row = if top_down {
+                    y * step
+                } else {
+                    (height as usize - 1 - y) * step
+                };
+                let source = &bytes[source_row..source_row + row_bytes];
+                let dest = &mut rgba[y * row_bytes..(y + 1) * row_bytes];
+                for (src, dst) in source.chunks_exact(4).zip(dest.chunks_exact_mut(4)) {
+                    // MF RGB32 is BGRA in memory.
+                    dst[0] = src[2];
+                    dst[1] = src[1];
+                    dst[2] = src[0];
+                    dst[3] = 255;
+                }
             }
         }
+        buffer.Unlock().ok();
         let image = image::RgbaImage::from_raw(width, height, rgba)
             .ok_or_else(|| "frame buffer mismatch".to_owned())?;
-        let image = downscale_to_cap(image, cap)?;
+        let image = downscale_to_cap(image, cap.min(2048))?;
         let frame = VideoFrame {
             rgba: image,
             delay: sample_delay.clamp(Duration::from_millis(5), Duration::from_secs(1)),
@@ -281,6 +309,7 @@ unsafe fn decode_inner(
         if !send(tx, stop, Ok(frame)) {
             break;
         }
+        index += 1;
     }
     Ok(())
 }
