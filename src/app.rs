@@ -1,4 +1,4 @@
-use crate::{assoc, files::*, imaging::*, loader::ImageLoader};
+use crate::{assoc, files::*, imaging::*, loader::ImageLoader, sync::LockRecover};
 use eframe::egui;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -1281,11 +1281,7 @@ pub fn run() -> eframe::Result<()> {
         crate::report::open_issue(&report);
     }
     if app.settings.auto_update && !no_update {
-        crate::update::start_background_check_with_notice(
-            env!("CARGO_PKG_VERSION"),
-            notice,
-            update_state,
-        );
+        crate::update::start_background_check(env!("CARGO_PKG_VERSION"), notice, update_state);
     } else {
         app.set_update_status("自動更新: オフ");
     }
