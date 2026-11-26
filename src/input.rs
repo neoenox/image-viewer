@@ -28,33 +28,11 @@ impl ViewerApp {
     pub(crate) fn handle_keys(&mut self, ctx: &egui::Context) {
         // Escape works while a modal is open; other shortcuts must not leak
         // into the viewer during modal or text input.
-        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-            if self.show_settings {
-                self.show_settings = false;
-                return;
-            }
-            if self.show_assoc {
-                self.show_assoc = false;
-                return;
-            }
-            if self.fullscreen {
-                self.fullscreen = false;
-                ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
-                return;
-            }
-            if self.slideshow {
-                self.slideshow = false;
-                return;
-            }
-        }
-        if self.show_settings || self.show_assoc || ctx.wants_keyboard_input() {
+        if self.dismiss_topmost(ctx) {
             return;
         }
-        // The interval slider consumes arrow/Space itself; don't also navigate.
-        if let Some(id) = self.interval_slider_id {
-            if ctx.memory(|m| m.focused()) == Some(id) {
-                return;
-            }
+        if self.shortcuts_blocked(ctx) {
+            return;
         }
         if ctx.input(|i| i.key_pressed(egui::Key::Tab)) {
             self.toolbar_pinned = !self.toolbar_pinned;
@@ -103,8 +81,7 @@ impl ViewerApp {
             }
         }
         if ctx.input(|i| i.key_pressed(egui::Key::F) || i.key_pressed(egui::Key::F11)) {
-            self.fullscreen = !self.fullscreen;
-            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.fullscreen));
+            self.toggle_fullscreen(ctx);
         }
         // F12: 表示レイテンシの計測。ワーカーの所要時間だけでなく、描画と
         // テクスチャのアップロードを含む実表示を測る（README 参照）。
@@ -115,8 +92,7 @@ impl ViewerApp {
             if self.is_animated() {
                 self.toggle_animation_pause();
             } else {
-                self.slideshow = self.files.len() >= 2 && !self.slideshow;
-                self.last_advance = self.slideshow.then(Instant::now);
+                self.toggle_slideshow(false);
             }
         }
         if ctx.input(|i| i.key_pressed(egui::Key::Period)) {
@@ -130,7 +106,7 @@ impl ViewerApp {
     /// ホイールで前後画像へ移動。生デルタを使い1ノッチ=1枚に即応する。
     /// 中ボタン押下中の誤回転では移動しない。
     pub fn handle_wheel_nav(&mut self, ctx: &egui::Context) {
-        if self.show_settings || self.show_assoc {
+        if self.any_modal_open() {
             return;
         }
         let in_list = self.show_thumbnails

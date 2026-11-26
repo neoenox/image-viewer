@@ -116,8 +116,7 @@ impl eframe::App for ViewerApp {
                         (ICON_PLAY.to_string(), "再生 (Space)")
                     };
                     if ui.button(label).on_hover_text(tip).clicked() {
-                        self.slideshow = !self.slideshow;
-                        self.last_advance = Some(Instant::now());
+                        self.toggle_slideshow(true);
                     }
                     if self.slideshow {
                         let response = ui.add(
@@ -154,8 +153,7 @@ impl eframe::App for ViewerApp {
                         .on_hover_text(fs_tip)
                         .clicked()
                     {
-                        self.fullscreen = !self.fullscreen;
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.fullscreen));
+                        self.toggle_fullscreen(ctx);
                     }
                     if ui
                         .button("一覧")
@@ -526,8 +524,7 @@ impl ViewerApp {
             || !self.status_msg.is_empty()
             || pointer_near_top
             || self.files.is_empty()
-            || self.show_settings
-            || self.show_assoc
+            || self.any_modal_open()
     }
 
     /// 表示レイテンシのオーバーレイ（F12）。
