@@ -658,10 +658,12 @@ impl ViewerApp {
 
     /// Persistent label shown in the status bar for the background updater.
     pub(crate) fn update_status(&self) -> Option<String> {
-        self.update_state
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .clone()
+        self.update_state.lock_recover().clone()
+    }
+
+    /// Replace the persistent updater label from startup or the worker.
+    pub(crate) fn set_update_status(&self, message: impl Into<String>) {
+        *self.update_state.lock_recover() = Some(message.into());
     }
 
     /// 前後画像の先読みを要求し、遠い画像をキャッシュから捨てる。
@@ -1257,13 +1259,13 @@ pub fn run() -> eframe::Result<()> {
     match applied {
         Ok(Some(version)) => {
             let message = format!("更新を適用しました: v{version}");
-            *update_state.lock().unwrap_or_else(|e| e.into_inner()) = Some(message.clone());
+            app.set_update_status(message.clone());
             app.show_update_message(message);
         }
         Ok(None) => {}
         Err(error) => {
             let message = format!("更新の適用に失敗しました: {error}");
-            *update_state.lock().unwrap_or_else(|e| e.into_inner()) = Some(message.clone());
+            app.set_update_status(message.clone());
             app.show_update_message(message);
         }
     }
@@ -1285,7 +1287,7 @@ pub fn run() -> eframe::Result<()> {
             update_state,
         );
     } else {
-        *update_state.lock().unwrap_or_else(|e| e.into_inner()) = Some("自動更新: オフ".to_owned());
+        app.set_update_status("自動更新: オフ");
     }
     // 前回のウィンドウ状態（サイズ・位置・最大化）で開く。
     // 復元OFF・初回・不正値は既定ジオメトリ（詳細は window_state を参照）。
