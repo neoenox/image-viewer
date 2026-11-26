@@ -330,10 +330,12 @@ impl eframe::App for ViewerApp {
                 && avail.x > 0.0
                 && avail.y > 0.0
             {
-                let rel = hover.unwrap() - view_rect.min;
-                let tx = (rel.x / avail.x).clamp(0.0, 1.0);
-                let ty = (rel.y / avail.y).clamp(0.0, 1.0);
-                self.pan_offset = Self::pan_for_hover(avail, disp, tx, ty);
+                if let Some(hover) = hover {
+                    let rel = hover - view_rect.min;
+                    let tx = (rel.x / avail.x).clamp(0.0, 1.0);
+                    let ty = (rel.y / avail.y).clamp(0.0, 1.0);
+                    self.pan_offset = Self::pan_for_hover(avail, disp, tx, ty);
+                }
             }
             self.clamp_pan(avail, disp);
             let center = view_rect.center() + self.pan_offset;
@@ -347,10 +349,15 @@ impl eframe::App for ViewerApp {
             );
             // Load original pixels as soon as the (at most 2048 px) preview would be
             // stretched on screen, not only from 100% up, so magnified views stay sharp.
-            let preview_stretched = disp.x > handle.size()[0] as f32 + 0.5;
+            // Either axis stretching counts, so portrait images magnified vertically
+            // also request original pixels.
+            let preview_stretched =
+                disp.x > handle.size()[0] as f32 + 0.5 || disp.y > handle.size()[1] as f32 + 0.5;
             if !self.fit && preview_stretched && !self.is_animated() {
                 if let Some(base) = &self.base {
-                    let (ow, oh) = self.orig_dims.unwrap();
+                    let Some((ow, oh)) = self.orig_dims else {
+                        return;
+                    };
                     if ow > base.width() || oh > base.height() {
                         let visible = view_rect.intersect(img_rect);
                         let lo = ((visible.min - img_rect.min) / scale).max(egui::Vec2::ZERO);

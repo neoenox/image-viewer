@@ -39,7 +39,14 @@ fn update_dir() -> Option<PathBuf> {
 }
 
 fn log_error(dir: &Path, message: &str) {
-    let _ = fs::write(dir.join("update.log"), message.as_bytes());
+    // Append so a history of outcomes survives, not just the most recent one.
+    use std::io::Write;
+    let line = format!("{} {message}\n", unix_seconds(),);
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("update.log"))
+        .and_then(|mut file| file.write_all(line.as_bytes()));
 }
 
 /// Prefer the OS copy so a user-writable PATH entry cannot hijack downloads.
@@ -172,12 +179,28 @@ pub fn start_background_check_with_notice(
 ) {
     #[cfg(windows)]
     {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        // Only one background check at a time: a second call while one is in
+        // flight reuses the running check instead of racing on the fixed
+        // `pending.tmp` staging path.
+        static CHECK_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+        if CHECK_IN_FLIGHT.swap(true, Ordering::AcqRel) {
+            return;
+        }
         let version = version.to_owned();
         let worker_state = state.clone();
         publish_state(&state, "自動更新: 確認中...");
         if std::thread::Builder::new()
             .name("image-updater".to_owned())
             .spawn(move || {
+                // Always clear the guard so a later launch can check again.
+                struct Guard;
+                impl Drop for Guard {
+                    fn drop(&mut self) {
+                        CHECK_IN_FLIGHT.store(false, Ordering::Release);
+                    }
+                }
+                let _guard = Guard;
                 let Some(dir) = update_dir() else {
                     publish_state(&worker_state, "自動更新: 設定が読めません");
                     return;
@@ -196,6 +219,7 @@ pub fn start_background_check_with_notice(
             })
             .is_err()
         {
+            CHECK_IN_FLIGHT.store(false, Ordering::Release);
             publish_state(&state, "自動更新: 開始できませんでした");
         }
     }
@@ -270,9 +294,10 @@ where
 {
     let checksums = fetch(&format!("{RELEASE_BASE}{CHECKSUMS}"))?;
     let _ = fs::create_dir_all(dir);
-    record_check(dir);
     let text = String::from_utf8_lossy(&checksums);
     let Some((asset, new_version)) = find_newer_asset(&text, version) else {
+        // A successful check that found nothing newer still advances the throttle.
+        record_check(dir);
         return Ok(None);
     };
     let temp = dir.join(TEMP_EXE);
@@ -281,6 +306,8 @@ where
     let hash = sha256_file(&temp)?;
     if hash != asset.hash {
         let _ = fs::remove_file(&temp);
+        // A failed download/checksum must not burn the 24h window: leave the
+        // last-check time untouched so the next launch retries promptly.
         return Err("downloaded exe failed its checksum".to_owned());
     }
 
@@ -290,6 +317,7 @@ where
     fs::write(dir.join(PENDING_HASH), hash.as_bytes()).map_err(|e| format!("stage hash: {e}"))?;
     fs::write(dir.join(PENDING_VERSION), new_version.as_bytes())
         .map_err(|e| format!("stage version: {e}"))?;
+    record_check(dir);
     Ok(Some(new_version))
 }
 
@@ -369,7 +397,20 @@ fn http_get(url: &str) -> Result<Vec<u8>, String> {
     #[cfg(windows)]
     {
         let timeout = CURL_TIMEOUT_SECS.to_string();
-        curl(&["-fsSL", "--max-time", timeout.as_str(), "--retry", "2", url])
+        // `--proto` / `--proto-redir` keep curl on HTTPS even across redirects,
+        // so a future dynamic URL cannot be downgraded to file:// etc.
+        curl(&[
+            "-fsSL",
+            "--proto",
+            "=https",
+            "--proto-redir",
+            "=https",
+            "--max-time",
+            timeout.as_str(),
+            "--retry",
+            "2",
+            url,
+        ])
     }
     #[cfg(not(windows))]
     {
@@ -385,6 +426,10 @@ fn http_download(url: &str, path: &Path) -> Result<(), String> {
         let destination = path.to_string_lossy();
         curl(&[
             "-fsSL",
+            "--proto",
+            "=https",
+            "--proto-redir",
+            "=https",
             "--max-time",
             timeout.as_str(),
             "--retry",
