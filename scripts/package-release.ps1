@@ -52,7 +52,7 @@ $instructions = @"
 1. このZIPを展開します
 2. PowerShellで install.ps1 を実行します
    powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
-3. 画像と動画の関連付けが登録されます。ダブルクリックの既定は
+3. 画像の関連付けが登録されます。ダブルクリックの既定は
    Windowsが保護しているため、必要なら設定 > 既定のアプリで確定してください
 
 アンインストール: uninstall.ps1 を同じ方法で実行します

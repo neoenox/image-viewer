@@ -130,8 +130,14 @@ impl ViewerSettings {
     /// startup.
     pub fn load(path: &Path) -> Self {
         let mut settings = Self::default();
-        let Ok(text) = std::fs::read_to_string(path) else {
-            return settings;
+        // A missing file is a normal first run; an unreadable one (torn write,
+        // bit-rot) falls back to the recovery copy written by `save`.
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(_) => {
+                let bak = path.with_extension("bak");
+                std::fs::read_to_string(&bak).unwrap_or_default()
+            }
         };
         for line in text.lines() {
             let Some((key, value)) = line.split_once('=') else {

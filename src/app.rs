@@ -313,6 +313,7 @@ impl ViewerApp {
             // 通常は先読み/読込時に縮小済み。念のため上限ガード。
             let Ok(rgba) = downscale_to_cap(rgba, self.tex_cap) else {
                 self.texture = None;
+                self.load_error = Some("表示用に縮小できませんでした".to_owned());
                 return;
             };
             let (w, h) = (rgba.width() as usize, rgba.height() as usize);
@@ -500,11 +501,13 @@ impl ViewerApp {
                         self.base = Some(image.rgba);
                         self.orig_dims = Some(image.orig);
                         if image.gif {
-                            self.animation = Some(crate::animation::Animation::new(
-                                self.current_path().unwrap().to_owned(),
-                                self.tex_cap,
-                            ));
-                            self.anim_due = Some(Instant::now());
+                            if let Some(path) = self.current_path() {
+                                self.animation = Some(crate::animation::Animation::new(
+                                    path.to_owned(),
+                                    self.tex_cap,
+                                ));
+                                self.anim_due = Some(Instant::now());
+                            }
                         }
                         self.rebuild_texture(ctx);
                         if self.show_stats {
@@ -724,22 +727,20 @@ impl ViewerApp {
     }
 
     pub fn rotate_cw(&mut self, ctx: &egui::Context) {
-        if self.base.is_none() {
-            return;
-        }
-        self.rotation = (self.rotation + 1) % 4;
-        self.detail_tiles.clear();
-        self.clear_upscale();
-        self.detail_key = None;
-        self.detail_pending = false;
-        self.rebuild_texture(ctx);
+        self.rotate_by(1, ctx);
     }
 
     pub fn rotate_ccw(&mut self, ctx: &egui::Context) {
+        self.rotate_by(3, ctx);
+    }
+
+    /// Rotate the current image by `delta` quarter-turns clockwise (1 = 90° CW,
+    /// 3 = 90° CCW). No-op without a loaded image.
+    fn rotate_by(&mut self, delta: u8, ctx: &egui::Context) {
         if self.base.is_none() {
             return;
         }
-        self.rotation = (self.rotation + 3) % 4;
+        self.rotation = (self.rotation + delta) % 4;
         self.detail_tiles.clear();
         self.clear_upscale();
         self.detail_key = None;
@@ -928,6 +929,7 @@ impl ViewerApp {
     /// Drops everything derived from the current pixels (new image, rotation, ...).
     pub(crate) fn clear_upscale(&mut self) {
         self.detail_rgba = None;
+        self.detail_tiles.clear();
         self.upscale_tex = None;
         self.upscale_pending = None;
         self.upscale_failed = None;
