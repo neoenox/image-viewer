@@ -41,10 +41,7 @@ fn update_dir() -> Option<PathBuf> {
 fn log_error(dir: &Path, message: &str) {
     // Append so a history of outcomes survives, not just the most recent one.
     use std::io::Write;
-    let line = format!(
-        "{} {message}\n",
-        unix_seconds(),
-    );
+    let line = format!("{} {message}\n", unix_seconds(),);
     let _ = std::fs::OpenOptions::new()
         .create(true)
         .append(true)

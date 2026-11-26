@@ -351,8 +351,8 @@ impl eframe::App for ViewerApp {
             // stretched on screen, not only from 100% up, so magnified views stay sharp.
             // Either axis stretching counts, so portrait images magnified vertically
             // also request original pixels.
-            let preview_stretched = disp.x > handle.size()[0] as f32 + 0.5
-                || disp.y > handle.size()[1] as f32 + 0.5;
+            let preview_stretched =
+                disp.x > handle.size()[0] as f32 + 0.5 || disp.y > handle.size()[1] as f32 + 0.5;
             if !self.fit && preview_stretched && !self.is_animated() {
                 if let Some(base) = &self.base {
                     let Some((ow, oh)) = self.orig_dims else {
