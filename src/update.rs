@@ -13,6 +13,7 @@
 //! to once per 24 hours. Outcomes are also shown briefly in the status line
 //! and logged to `update/update.log`.
 
+use crate::sync::LockRecover;
 use std::cmp::Ordering;
 use std::fs::{self, File};
 use std::io::Read;
@@ -172,7 +173,7 @@ fn record_check(dir: &Path) {
 }
 
 /// Starts the release check off the UI thread and publishes its outcome.
-pub fn start_background_check_with_notice(
+pub fn start_background_check(
     version: &str,
     notice: Arc<Mutex<Option<String>>>,
     state: Arc<Mutex<Option<String>>>,
@@ -189,7 +190,7 @@ pub fn start_background_check_with_notice(
         }
         let version = version.to_owned();
         let worker_state = state.clone();
-        publish_state(&state, "自動更新: 確認中...");
+        set_status(&state, "自動更新: 確認中...");
         if std::thread::Builder::new()
             .name("image-updater".to_owned())
             .spawn(move || {
@@ -202,61 +203,69 @@ pub fn start_background_check_with_notice(
                 }
                 let _guard = Guard;
                 let Some(dir) = update_dir() else {
-                    publish_state(&worker_state, "自動更新: 設定が読めません");
+                    set_status(&worker_state, "自動更新: 設定が読めません");
                     return;
                 };
                 let due = check_is_due(&dir);
-                let outcome = if due {
+                let check_result = if due {
                     check_and_stage(&version, &dir)
                 } else {
                     Ok(None)
                 };
-                let (status, message) = update_outcome(due, outcome);
-                publish_state(&worker_state, &status);
-                if let Some(message) = message {
-                    publish(&notice, message);
+                let outcome = update_outcome(due, check_result);
+                set_status(&worker_state, &outcome.status);
+                if let Some(message) = outcome.notice {
+                    publish_notice(&notice, message);
                 }
             })
             .is_err()
         {
             CHECK_IN_FLIGHT.store(false, Ordering::Release);
-            publish_state(&state, "自動更新: 開始できませんでした");
+            set_status(&state, "自動更新: 開始できませんでした");
         }
     }
     #[cfg(not(windows))]
     {
         let _ = version;
-        publish_state(&state, "自動更新: Windowsのみ");
+        set_status(&state, "自動更新: Windowsのみ");
     }
 }
-fn publish_state(state: &Arc<Mutex<Option<String>>>, message: impl Into<String>) {
-    let mut slot = state.lock().unwrap_or_else(|error| error.into_inner());
-    *slot = Some(message.into());
+fn set_status(state: &Arc<Mutex<Option<String>>>, message: impl Into<String>) {
+    *state.lock_recover() = Some(message.into());
+}
+
+fn publish_notice(notice: &Arc<Mutex<Option<String>>>, message: String) {
+    *notice.lock_recover() = Some(message);
+}
+
+/// Persistent status-bar label plus an optional one-shot status message.
+struct UpdateOutcome {
+    status: String,
+    notice: Option<String>,
 }
 
 /// Map a check result to the persistent label and the one-shot status line.
-fn update_outcome(due: bool, result: Result<Option<String>, String>) -> (String, Option<String>) {
+fn update_outcome(due: bool, result: Result<Option<String>, String>) -> UpdateOutcome {
     if !due {
-        return ("自動更新: 済み（次回は24時間後）".to_owned(), None);
+        return UpdateOutcome {
+            status: "自動更新: 済み（次回は24時間後）".to_owned(),
+            notice: None,
+        };
     }
     match result {
-        Ok(Some(version)) => (
-            format!("自動更新: v{version} 準備済み"),
-            Some(format!("更新を準備しました: v{version}（次回起動で適用）")),
-        ),
-        Ok(None) => (
-            "自動更新: 最新です".to_owned(),
-            Some("更新は最新です".to_owned()),
-        ),
-        Err(error) => (
-            format!("自動更新: 失敗（{error}）"),
-            Some(format!("更新に失敗しました: {error}")),
-        ),
+        Ok(Some(version)) => UpdateOutcome {
+            status: format!("自動更新: v{version} 準備済み"),
+            notice: Some(format!("更新を準備しました: v{version}（次回起動で適用）")),
+        },
+        Ok(None) => UpdateOutcome {
+            status: "自動更新: 最新です".to_owned(),
+            notice: Some("更新は最新です".to_owned()),
+        },
+        Err(error) => UpdateOutcome {
+            status: format!("自動更新: 失敗（{error}）"),
+            notice: Some(format!("更新に失敗しました: {error}")),
+        },
     }
-}
-fn publish(notice: &Arc<Mutex<Option<String>>>, message: String) {
-    let mut slot = notice.lock().unwrap_or_else(|error| error.into_inner());
-    *slot = Some(message);
 }
 
 /// One-shot check used by the installer: no window, no waiting on the UI.
@@ -590,28 +599,28 @@ mod tests {
     #[test]
     fn publish_stores_the_latest_notice() {
         let notice = Arc::new(Mutex::new(None));
-        publish(&notice, "first".to_owned());
-        publish(&notice, "second".to_owned());
+        publish_notice(&notice, "first".to_owned());
+        publish_notice(&notice, "second".to_owned());
         assert_eq!(notice.lock().unwrap().as_deref(), Some("second"));
     }
 
     #[test]
     fn update_outcome_reports_every_state() {
-        let (status, message) = update_outcome(false, Ok(None));
-        assert!(status.contains("済み"));
-        assert!(message.is_none());
+        let outcome = update_outcome(false, Ok(None));
+        assert!(outcome.status.contains("済み"));
+        assert!(outcome.notice.is_none());
 
-        let (status, message) = update_outcome(true, Ok(None));
-        assert!(status.contains("最新"));
-        assert_eq!(message.as_deref(), Some("更新は最新です"));
+        let outcome = update_outcome(true, Ok(None));
+        assert!(outcome.status.contains("最新"));
+        assert_eq!(outcome.notice.as_deref(), Some("更新は最新です"));
 
-        let (status, message) = update_outcome(true, Ok(Some("9.9.9".to_owned())));
-        assert!(status.contains("9.9.9"));
-        assert!(message.unwrap().contains("9.9.9"));
+        let outcome = update_outcome(true, Ok(Some("9.9.9".to_owned())));
+        assert!(outcome.status.contains("9.9.9"));
+        assert!(outcome.notice.unwrap().contains("9.9.9"));
 
-        let (status, message) = update_outcome(true, Err("接続できません".to_owned()));
-        assert!(status.contains("失敗"));
-        assert!(message.unwrap().contains("接続できません"));
+        let outcome = update_outcome(true, Err("接続できません".to_owned()));
+        assert!(outcome.status.contains("失敗"));
+        assert!(outcome.notice.unwrap().contains("接続できません"));
     }
     #[test]
     #[cfg(windows)]

@@ -1209,7 +1209,7 @@ mod tests {
         assert!(shows(&out, "再生中"));
 
         // 自動更新の状態は常時ステータスに出る（確認中／最新など）。
-        *app.update_state.lock().unwrap() = Some("自動更新: 最新です".to_owned());
+        app.set_update_status("自動更新: 最新です");
         let out = update_frame(&mut app, &ctx, raw_input(egui::vec2(800.0, 600.0), None));
         assert!(shows(&out, "自動更新: 最新です"));
         std::fs::remove_dir_all(&dir).ok();
