@@ -338,9 +338,7 @@ impl ViewerApp {
             .iter()
             .position(|p| same_file_path(p, &path))
             .unwrap_or(0);
-        self.rotation = 0;
-        self.fit = true;
-        self.zoom = 1.0;
+        self.reset_view_state();
         // 別フォルダの一覧になったため、サムネイルの保持世代を捨てる
         // （次フレームの可視分から作り直す。古いパスは触れない）。
         self.thumb_lru.clear();
@@ -666,6 +664,64 @@ impl ViewerApp {
         *self.update_state.lock_recover() = Some(message.into());
     }
 
+    /// Settings and association dialogs are the modal layers.
+    pub(crate) fn any_modal_open(&self) -> bool {
+        self.show_settings || self.show_assoc
+    }
+
+    /// Escape closes the topmost transient state; returns true when consumed.
+    pub(crate) fn dismiss_topmost(&mut self, ctx: &egui::Context) -> bool {
+        if !ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            return false;
+        }
+        if self.show_settings {
+            self.show_settings = false;
+            return true;
+        }
+        if self.show_assoc {
+            self.show_assoc = false;
+            return true;
+        }
+        if self.fullscreen {
+            self.fullscreen = false;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+            return true;
+        }
+        if self.slideshow {
+            self.slideshow = false;
+            return true;
+        }
+        false
+    }
+
+    /// Viewer shortcuts must not leak into modal or focused widgets.
+    pub(crate) fn shortcuts_blocked(&self, ctx: &egui::Context) -> bool {
+        self.any_modal_open()
+            || ctx.wants_keyboard_input()
+            || self
+                .interval_slider_id
+                .is_some_and(|id| ctx.memory(|m| m.focused()) == Some(id))
+    }
+
+    pub(crate) fn toggle_fullscreen(&mut self, ctx: &egui::Context) {
+        self.fullscreen = !self.fullscreen;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.fullscreen));
+    }
+
+    pub(crate) fn toggle_slideshow(&mut self, allow_single_image: bool) {
+        let can_start = allow_single_image || self.files.len() >= 2;
+        self.slideshow = !self.slideshow && can_start;
+        self.last_advance = self.slideshow.then(Instant::now);
+    }
+
+    fn reset_view_state(&mut self) {
+        self.rotation = 0;
+        self.fit = true;
+        self.zoom = 1.0;
+        self.pan_offset = egui::Vec2::ZERO;
+        self.wheel_accum = 0.0;
+    }
+
     /// 前後画像の先読みを要求し、遠い画像をキャッシュから捨てる。
     /// 前後2枚ずつ（最大5枚保持）でホイール連打にも追従する。
     pub(crate) fn request_preloads(&mut self) {
@@ -696,14 +752,10 @@ impl ViewerApp {
             return;
         }
         self.index = new_index % self.files.len();
-        self.rotation = 0;
-        self.fit = true;
-        self.zoom = 1.0;
-        self.pan_offset = egui::Vec2::ZERO;
+        self.reset_view_state();
         if self.show_thumbnails {
             self.pending_thumb_scroll = Some(new_index);
         }
-        self.wheel_accum = 0.0;
         self.load_current(Some(ctx));
         self.last_advance = Some(Instant::now());
     }
