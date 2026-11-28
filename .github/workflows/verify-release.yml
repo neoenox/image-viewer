@@ -5,6 +5,10 @@ name: Verify Release
 # matches it or that it is the expected version/architecture. This workflow
 # downloads the published asset and fails loudly if any of that is wrong.
 #
+# Installer/tools assets are attached manually after Release completes, and
+# GitHub has no release event for asset uploads. Re-run this workflow with
+# workflow_dispatch after attaching them to verify those assets too.
+#
 # Triggers:
 # - workflow_run: the Release workflow creates the GitHub Release with the
 #   repository GITHUB_TOKEN, and per GitHub's rules an event caused by the
@@ -72,30 +76,49 @@ jobs:
           New-Item -ItemType Directory -Path dist -Force | Out-Null
           gh release download '${{ steps.tag.outputs.tag }}' --repo '${{ github.repository }}' --dir dist --clobber
 
-      - name: Verify SHA256SUMS matches downloaded asset
+      - name: Verify available release assets against checksums
         if: steps.tag.outputs.skip != 'true'
         shell: pwsh
         run: |
-          $lines = Get-Content dist/SHA256SUMS.txt
-          if (-not $lines) { Write-Error 'empty SHA256SUMS.txt'; exit 1 }
+          $checksumFiles = @('dist/SHA256SUMS.txt', 'dist/SHA256SUMS-installer.txt') |
+            Where-Object { Test-Path -LiteralPath $_ }
+          if (-not (Test-Path -LiteralPath 'dist/SHA256SUMS-installer.txt')) {
+            Write-Output 'installer checksum file not present; re-run workflow_dispatch after attaching installer assets'
+          }
+          $listed = @{}
           $ok = $true
-          foreach ($line in $lines) {
-            if ([string]::IsNullOrWhiteSpace($line)) { continue }
-            $parts = $line -split '\s+', 2
-            $expected = $parts[0].Trim().ToLower()
-            $name = $parts[1].Trim()
-            $path = Join-Path dist $name
-            if (-not (Test-Path -LiteralPath $path)) {
-              Write-Error "missing asset listed in checksums: $name"
-              $ok = $false
-              continue
+          foreach ($file in $checksumFiles) {
+            foreach ($line in Get-Content -LiteralPath $file) {
+              if ([string]::IsNullOrWhiteSpace($line)) { continue }
+              $parts = $line -split '\s+', 2
+              if ($parts.Count -ne 2) {
+                Write-Error "bad checksum line in ${file}: $line"
+                $ok = $false
+                continue
+              }
+              $expected = $parts[0].Trim().ToLower()
+              $name = $parts[1].Trim()
+              $path = Join-Path dist $name
+              if (-not (Test-Path -LiteralPath $path)) {
+                Write-Error "missing asset listed in checksums: $name"
+                $ok = $false
+                continue
+              }
+              $actual = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLower()
+              if ($expected -ne $actual) {
+                Write-Error "hash mismatch for $name (expected $expected, got $actual)"
+                $ok = $false
+              } else {
+                Write-Output "hash OK: $name"
+              }
+              $listed[$name] = $true
             }
-            $actual = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLower()
-            if ($expected -ne $actual) {
-              Write-Error "hash mismatch for $name (expected $expected, got $actual)"
+          }
+          $assets = Get-ChildItem -Path dist -File | Where-Object { $_.Extension -in '.exe', '.zip' }
+          foreach ($asset in $assets) {
+            if (-not $listed.ContainsKey($asset.Name)) {
+              Write-Error "asset missing from checksums: $($asset.Name)"
               $ok = $false
-            } else {
-              Write-Output "hash OK: $name"
             }
           }
           if (-not $ok) { exit 1 }
@@ -105,8 +128,8 @@ jobs:
         shell: pwsh
         run: |
           $tag = '${{ steps.tag.outputs.tag }}' -replace '^v', ''
-          $exe = Get-ChildItem -Path dist -Filter *.exe | Select-Object -First 1
-          if (-not $exe) { Write-Error 'no exe asset found'; exit 1 }
+          $exe = Get-ChildItem -Path dist -Filter 'image-viewer-v*.exe' | Select-Object -First 1
+          if (-not $exe) { Write-Error 'no release exe asset found'; exit 1 }
           $ver = $exe.VersionInfo.ProductVersion
           if ($ver -ne $tag) {
             Write-Error "exe ProductVersion '$ver' does not match tag v$tag"
@@ -118,7 +141,7 @@ jobs:
         if: steps.tag.outputs.skip != 'true'
         shell: pwsh
         run: |
-          $exe = (Get-ChildItem -Path dist -Filter *.exe | Select-Object -First 1).FullName
+          $exe = (Get-ChildItem -Path dist -Filter 'image-viewer-v*.exe' | Select-Object -First 1).FullName
           $bytes = [System.IO.File]::ReadAllBytes($exe)
           if ([char]$bytes[0] -ne 'M' -or [char]$bytes[1] -ne 'Z') {
             Write-Error 'asset is not a PE (MZ) file'
