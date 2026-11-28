@@ -65,7 +65,7 @@ Root: HKCU; Subkey: "Software\Classes\{#ProgId}\shell\open\command"; ValueType: 
 Root: HKCU; Subkey: "Software\Classes\Applications\{#AppExeName}"; ValueType: string; ValueName: "FriendlyAppName"; ValueData: "{#AppName}"; Flags: uninsdeletekey
 Root: HKCU; Subkey: "Software\Classes\Applications\{#AppExeName}\shell\open\command"; ValueType: string; ValueData: """{app}\{#AppExeName}"" ""%1"""
 Root: HKCU; Subkey: "Software\ImageViewer\Capabilities"; ValueType: string; ValueName: "ApplicationName"; ValueData: "{#AppName}"; Flags: uninsdeletekey
-Root: HKCU; Subkey: "Software\ImageViewer\Capabilities"; ValueType: string; ValueName: "ApplicationDescription"; ValueData: "{#AppName} 画像・動画ビューワー"
+Root: HKCU; Subkey: "Software\ImageViewer\Capabilities"; ValueType: string; ValueName: "ApplicationDescription"; ValueData: "{#AppName} 画像ビューワー"
 Root: HKCU; Subkey: "Software\ImageViewer\Capabilities"; ValueType: string; ValueName: "ApplicationIcon"; ValueData: "{app}\{#AppExeName},0"
 Root: HKCU; Subkey: "Software\RegisteredApplications"; ValueType: string; ValueName: "{#AppName}"; ValueData: "Software\ImageViewer\Capabilities"; Flags: uninsdeletevalue
 
@@ -122,12 +122,6 @@ Root: HKCU; Subkey: "Software\Classes\.pbm"; ValueType: string; ValueData: "{#Pr
 Root: HKCU; Subkey: "Software\Classes\.pgm"; ValueType: string; ValueData: "{#ProgId}"; Tasks: defaultassoc; Flags: uninsdeletevalue
 Root: HKCU; Subkey: "Software\Classes\.ppm"; ValueType: string; ValueData: "{#ProgId}"; Tasks: defaultassoc; Flags: uninsdeletevalue
 Root: HKCU; Subkey: "Software\Classes\.pam"; ValueType: string; ValueData: "{#ProgId}"; Tasks: defaultassoc; Flags: uninsdeletevalue
-Root: HKCU; Subkey: "Software\Classes\.mp4"; ValueType: string; ValueData: "{#ProgId}"; Tasks: defaultassoc; Flags: uninsdeletevalue
-Root: HKCU; Subkey: "Software\Classes\.m4v"; ValueType: string; ValueData: "{#ProgId}"; Tasks: defaultassoc; Flags: uninsdeletevalue
-Root: HKCU; Subkey: "Software\Classes\.mov"; ValueType: string; ValueData: "{#ProgId}"; Tasks: defaultassoc; Flags: uninsdeletevalue
-Root: HKCU; Subkey: "Software\Classes\.avi"; ValueType: string; ValueData: "{#ProgId}"; Tasks: defaultassoc; Flags: uninsdeletevalue
-Root: HKCU; Subkey: "Software\Classes\.wmv"; ValueType: string; ValueData: "{#ProgId}"; Tasks: defaultassoc; Flags: uninsdeletevalue
-Root: HKCU; Subkey: "Software\Classes\.webm"; ValueType: string; ValueData: "{#ProgId}"; Tasks: defaultassoc; Flags: uninsdeletevalue
 
 [Run]
 Filename: "{app}\{#AppExeName}"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags: nowait postinstall skipifsilent

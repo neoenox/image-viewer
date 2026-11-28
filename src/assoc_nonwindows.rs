@@ -7,20 +7,7 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-pub const PROG_ID: &str = "ImageViewer.App";
-pub const APP_NAME: &str = "画像ビューワー";
-pub const CAPS_BASE: &str = "Software\\ImageViewer\\Capabilities";
-
-/// Same normalization as the Windows side: trim, strip leading dots,
-/// lowercase, ASCII-alphanumeric non-empty only.
-pub fn sanitize_ext(ext: &str) -> Option<String> {
-    let clean = ext.trim().trim_start_matches('.').to_ascii_lowercase();
-    if !clean.is_empty() && clean.bytes().all(|b| b.is_ascii_alphanumeric()) {
-        Some(clean)
-    } else {
-        None
-    }
-}
+pub use crate::assoc_common::{sanitize_ext, APP_NAME, CAPS_BASE, PROG_ID};
 
 pub fn exe_path() -> io::Result<PathBuf> {
     std::env::current_exe()

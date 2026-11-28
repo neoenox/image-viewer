@@ -125,6 +125,11 @@ impl ViewerSettings {
         std::env::var_os("APPDATA")
             .map(|dir| PathBuf::from(dir).join("image-viewer").join("settings.txt"))
     }
+
+    /// Directory that owns all per-user files (`%APPDATA%\image-viewer`).
+    pub fn data_dir() -> Option<PathBuf> {
+        Self::default_path()?.parent().map(Path::to_path_buf)
+    }
     /// Reads `key=value` lines. Missing or unreadable files, unknown keys and bad
     /// values fall back to the defaults, so an old or hand-edited file never blocks
     /// startup.

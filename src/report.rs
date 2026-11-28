@@ -5,7 +5,6 @@
 //! the user still decides whether to submit it. No token or network call is
 //! made by the app itself.
 
-use std::path::PathBuf;
 use std::sync::Mutex;
 
 const CRASH_FILE: &str = "crash.txt";
@@ -19,16 +18,11 @@ pub fn set_context(context: impl Into<String>) {
     }
 }
 
-fn data_dir() -> Option<PathBuf> {
-    crate::settings::ViewerSettings::default_path()
-        .and_then(|path| path.parent().map(|parent| parent.to_path_buf()))
-}
-
 /// Install a panic hook that keeps the default output and records a report.
 pub fn install_panic_hook() {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        if let Some(dir) = data_dir() {
+        if let Some(dir) = crate::settings::ViewerSettings::data_dir() {
             let context = CONTEXT
                 .lock()
                 .ok()
@@ -57,7 +51,7 @@ fn take_pending_from(dir: &std::path::Path) -> Option<String> {
 
 /// Return and consume a pending crash report.
 pub fn take_pending() -> Option<String> {
-    data_dir().and_then(|dir| take_pending_from(&dir))
+    crate::settings::ViewerSettings::data_dir().and_then(|dir| take_pending_from(&dir))
 }
 
 fn issue_url(report: &str) -> String {

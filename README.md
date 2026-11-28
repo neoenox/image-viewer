@@ -34,22 +34,22 @@ cargo llvm-cov --locked --all-targets --summary-only --fail-under-lines 85
 ```
 
 The CI `coverage` job runs exactly that and uploads the `lcov` report as the
-`coverage` artifact. The 85% floor is a floor, not a target: the last recorded
-Windows measurement was **87.27%** of 7023 lines (894 uncovered), leaving about
+`coverage` artifact. The 85% floor is a floor, not a target: the latest recorded
+Windows measurement was **87.3%** of 6123 lines (778 uncovered), leaving about
 two points of slack for runner variation while still failing a change that adds
 a few hundred uncovered lines. The uploaded report is authoritative for later
-changes. Raise the floor as coverage improves; do not lower it to make a red run
-green. Ignored benchmark tests do not run by default and are therefore not
-counted, and code behind `#[cfg(not(windows))]` is not compiled on the
-measuring platform.
+measurement, not this snapshot. Raise the floor as coverage improves; do not
+lower it to make a red run green. Ignored benchmark tests do not run by default
+and are therefore not counted, and code behind `#[cfg(not(windows))]` is not
+compiled on the measuring platform.
 
 ## Installing
 
-Download `image-viewer-installer-<version>.exe` from the GitHub Release and run it.
-It is a standard Inno Setup 6 wizard with Japanese UI (same as the other
-neoenox tools). It performs a per-user install to
-`%LOCALAPPDATA%\Programs\ImageViewer`, creates Start Menu entries, registers
-file associations and provides a proper uninstaller.
+When attached to the GitHub Release, download
+`image-viewer-installer-<version>.exe` and run it. It is a standard Inno Setup 6
+wizard with Japanese UI (same as the other neoenox tools). It performs a
+per-user install to `%LOCALAPPDATA%\Programs\ImageViewer`, registers the file
+associations listed in `SUPPORTED_EXTS` and provides a proper uninstaller.
 
 The optional ZIP `image-viewer-tools-<version>-windows-x86_64.zip` contains the
 same scripts for manual installation or repair, plus `check-update.ps1`:
@@ -59,9 +59,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
 
 It copies the exe to `%LOCALAPPDATA%\Programs\ImageViewer`, creates a Start
 Menu shortcut, registers the file associations and adds an uninstall entry.
-The installer also runs `image-viewer.exe --check-update`, so a newer release
-is verified and staged silently during installation and applied at the next
-launch. Use `scripts\uninstall.ps1` to reverse it.
+The tools install script runs `image-viewer.exe --check-update`, so a newer
+release is verified and staged silently during installation and applied at the
+next launch. Use `scripts\uninstall.ps1` to reverse it. The automated release
+workflow publishes the exe and `SHA256SUMS.txt`; installer and tools ZIP assets
+are attached to the release separately. After attaching them, run the
+`Verify Release` workflow manually with the tag to checksum-verify those assets.
+
 The version is shown at the right end of the status bar, so an applied update
 can be identified without opening a dialog.
 
