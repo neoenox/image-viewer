@@ -1,7 +1,7 @@
 # CI guard: forbid writes to production registry keys in tests.
 #
 # Production keys (real user settings) live only in:
-# - src/assoc.rs constants (PROG_ID/CAPS_BASE/APP_NAME, read by --print-assoc-config)
+# - src/assoc_common.rs constants/validator, re-exported by both assoc modules
 # - scripts/*.ps1 via --print-assoc-config (redirected to IVReview: in tests)
 #
 # tests/*.rs and tests/association-scripts.ps1 must use ONLY isolated HKCU
@@ -92,13 +92,31 @@ if (Test-Path -LiteralPath $installerTest) {
 $assocRs = Join-Path $repoRoot 'src\assoc.rs'
 if (Test-Path -LiteralPath $assocRs) {
     $text = Get-Content -LiteralPath $assocRs -Raw
-    $sanitizePos = $text.IndexOf('sanitize_ext')
-    $createPos = $text.IndexOf('create_subkey')
+    $sanitizePos = $text.IndexOf('sanitize_ext(')
+    $createPos = $text.IndexOf('create_subkey(')
     if ($sanitizePos -lt 0 -or $createPos -lt 0 -or $sanitizePos -gt $createPos) {
         Add-Failure 'src/assoc.rs must validate (sanitize_ext) before create_subkey'
     }
 } else {
     Add-Failure 'src/assoc.rs missing'
+}
+
+# 4. The validator itself is single-sourced and re-exported by both cfg variants.
+$commonRs = Join-Path $repoRoot 'src\assoc_common.rs'
+if (-not (Test-Path -LiteralPath $commonRs)) {
+    Add-Failure 'src/assoc_common.rs missing'
+} else {
+    $commonText = Get-Content -LiteralPath $commonRs -Raw
+    if ($commonText -notmatch 'pub fn sanitize_ext') {
+        Add-Failure 'src/assoc_common.rs must own sanitize_ext'
+    }
+    foreach ($name in @('assoc.rs', 'assoc_nonwindows.rs')) {
+        $path = Join-Path (Join-Path $repoRoot 'src') $name
+        $text = Get-Content -LiteralPath $path -Raw
+        if ($text -notmatch 'assoc_common' -or $text -notmatch 'sanitize_ext') {
+            Add-Failure "$name must re-export assoc_common::sanitize_ext"
+        }
+    }
 }
 
 if ($failures.Count -gt 0) {

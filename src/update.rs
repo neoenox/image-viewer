@@ -35,8 +35,7 @@ const CHECK_INTERVAL_SECS: u64 = 24 * 60 * 60;
 const CURL_TIMEOUT_SECS: u8 = 20;
 
 fn update_dir() -> Option<PathBuf> {
-    crate::settings::ViewerSettings::default_path()
-        .and_then(|path| path.parent().map(|parent| parent.join("update")))
+    Some(crate::settings::ViewerSettings::data_dir()?.join("update"))
 }
 
 fn log_error(dir: &Path, message: &str) {

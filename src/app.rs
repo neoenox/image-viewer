@@ -1247,49 +1247,19 @@ impl ViewerApp {
     }
 }
 
-fn is_valid_launch_path(path: &Path) -> bool {
-    path.exists() && (path.is_dir() || is_supported(path))
-}
-
-/// 起動引数から画像パスと `--stats` を順番に依存せず読み出す。
-fn parse_launch_args<I: IntoIterator<Item = std::ffi::OsString>>(
-    args: I,
-) -> (Option<PathBuf>, bool) {
-    let (mut path, mut stats) = (None, false);
-    for arg in args {
-        if arg == "--stats" {
-            stats = true;
-            continue;
-        }
-        if path.is_none() {
-            let candidate = PathBuf::from(arg);
-            if is_valid_launch_path(&candidate) {
-                path = Some(candidate);
-            }
-        }
-    }
-    (path, stats)
-}
-
-/// `--no-update` が起動引数にあれば更新チェックを止める。
-fn no_update_requested<I: IntoIterator<Item = std::ffi::OsString>>(args: I) -> bool {
-    args.into_iter().any(|arg| arg == "--no-update")
-}
 /// Append timing lines only when `IV_STARTUP_LOG` is set.
 fn startup_log(label: &str, started: Instant) {
     if std::env::var_os("IV_STARTUP_LOG").is_none() {
         return;
     }
-    let Some(path) = crate::settings::ViewerSettings::default_path()
-        .and_then(|p| p.parent().map(|dir| dir.join("startup.log")))
-    else {
+    let Some(dir) = crate::settings::ViewerSettings::data_dir() else {
         return;
     };
     use std::io::Write;
     if let Ok(mut file) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(path)
+        .open(dir.join("startup.log"))
     {
         let _ = writeln!(file, "{label}: {} ms", started.elapsed().as_millis());
     }
@@ -1301,10 +1271,10 @@ pub fn run() -> eframe::Result<()> {
     let notice = Arc::new(Mutex::new(None));
     let update_state = Arc::new(Mutex::new(None));
     startup_log("pending update applied", started);
-    let args: Vec<_> = std::env::args_os().skip(1).collect();
-    let no_update = no_update_requested(args.iter().cloned());
-    let (initial, stats) = parse_launch_args(args);
-    let mut app = ViewerApp::new(initial);
+    let cli = crate::Cli::from_env();
+    let no_update = cli.no_update;
+    let stats = cli.stats;
+    let mut app = ViewerApp::new(cli.path);
     app.update_notice = notice.clone();
     app.update_state = update_state.clone();
     startup_log("app constructed", started);
@@ -1357,33 +1327,6 @@ pub fn run() -> eframe::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{no_update_requested, parse_launch_args};
-
-    fn os_args(list: &[&str]) -> Vec<std::ffi::OsString> {
-        list.iter().copied().map(std::ffi::OsString::from).collect()
-    }
-
-    #[test]
-    fn launch_args_are_order_independent() {
-        assert_eq!(parse_launch_args(os_args(&[])), (None, false));
-        let dir = std::env::temp_dir().join(format!("iv-launch-args-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let png = dir.join("photo.png");
-        image::RgbaImage::new(2, 2).save(&png).unwrap();
-        let arg = png.to_string_lossy().into_owned();
-        assert!(parse_launch_args(os_args(&[&arg, "--stats"])).1);
-        let (path, stats) = parse_launch_args(os_args(&["--stats", &arg]));
-        assert!(stats);
-        assert_eq!(path, Some(png));
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn no_update_flag_is_recognised_anywhere() {
-        assert!(!no_update_requested(os_args(&["photo.png"])));
-        assert!(no_update_requested(os_args(&["--no-update"])));
-        assert!(no_update_requested(os_args(&["photo.png", "--no-update"])));
-    }
     #[test]
     fn file_change_reloads_and_drops_derived_state() {
         let dir = std::env::temp_dir().join(format!("iv-file-change-{}", std::process::id()));
@@ -1481,21 +1424,6 @@ mod tests {
         assert_eq!(app.load_error(), None);
         assert!(app.status_msg.contains("2"));
         drop(app);
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn cli_only_accepts_existing_supported_paths() {
-        let dir = std::env::temp_dir().join(format!("iv-cli-filter-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let txt = dir.join("note.txt");
-        let png = dir.join("sample.png");
-        std::fs::write(&txt, b"not an image").unwrap();
-        std::fs::write(&png, b"placeholder").unwrap();
-        assert!(is_valid_launch_path(&dir));
-        assert!(is_valid_launch_path(&png));
-        assert!(!is_valid_launch_path(&txt));
-        assert!(!is_valid_launch_path(&dir.join("missing.png")));
         std::fs::remove_dir_all(dir).unwrap();
     }
 

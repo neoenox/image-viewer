@@ -2,7 +2,7 @@
 //! visible part is resampled with Lanczos3 to exactly the on-screen pixel size on a
 //! background thread, replacing the GPU's bilinear stretch once it is ready.
 
-use crate::sync::{wait_recover, LockRecover};
+use crate::sync::{catch_panic, wait_recover, LockRecover};
 use std::sync::{Arc, Condvar, Mutex};
 
 /// 4K output fits; larger canvases are rejected before allocating any buffers.
@@ -75,10 +75,9 @@ impl Upscaler {
                     }
                 };
                 // A codec panic must not kill the worker; report it as a failed resample.
-                let image = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    resample(&request.source, &request.key)
-                }))
-                .unwrap_or(None);
+                let image =
+                    catch_panic(|| Ok::<_, String>(resample(&request.source, &request.key)))
+                        .unwrap_or(None);
                 let mut slot = lock.lock_recover();
                 // A newer request supersedes this result; keep only the latest.
                 // Failures are reported too, so the caller stops waiting for them.

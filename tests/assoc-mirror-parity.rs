@@ -6,6 +6,8 @@
 //! either side fails compilation here on all CI platforms (Windows included,
 //! where this exercises only the mirror, never the registry).
 
+#[path = "../src/assoc_common.rs"]
+mod assoc_common;
 #[path = "../src/assoc_nonwindows.rs"]
 mod mirror;
 

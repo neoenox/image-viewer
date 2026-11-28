@@ -10,10 +10,7 @@ use std::path::{Path, PathBuf};
 
 use winreg::{enums::HKEY_CURRENT_USER, RegKey};
 
-/// 本番用ProgID・アプリ名・Capabilities配置。
-pub const PROG_ID: &str = "ImageViewer.App";
-pub const APP_NAME: &str = "画像ビューワー";
-pub const CAPS_BASE: &str = r"Software\ImageViewer\Capabilities";
+pub use crate::assoc_common::{sanitize_ext, APP_NAME, CAPS_BASE, PROG_ID};
 
 // Explorerへの変更通知はshell32直呼び（新規依存なし）。
 #[cfg(windows)]
@@ -34,17 +31,6 @@ fn notify_shell_assoc_changed() {
     {
         // SHCNE_ASSOCCHANGED = 0x08000000, SHCNF_IDLIST = 0.
         unsafe { SHChangeNotify(0x0800_0000, 0, std::ptr::null(), std::ptr::null()) };
-    }
-}
-
-/// 拡張子を正規化する。前のドット・前後空白・大文字を吸収し、
-/// 英数字のみ・非空のものだけ受け付ける。レジストリ値名の安全のため。
-pub fn sanitize_ext(ext: &str) -> Option<String> {
-    let clean = ext.trim().trim_start_matches('.').to_ascii_lowercase();
-    if !clean.is_empty() && clean.bytes().all(|b| b.is_ascii_alphanumeric()) {
-        Some(clean)
-    } else {
-        None
     }
 }
 
